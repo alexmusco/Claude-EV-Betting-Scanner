@@ -1047,3 +1047,97 @@ class TestNearMissReporting:
         assert "legs built" in out
         if "Ranked by expected value" in out and "0 clean" not in out:
             assert "only_+ev_because_of_assumed_correlation" in out
+
+
+class TestPayoutsInit:
+    """
+    Verified ladders must not live inside the repository.
+
+    The shipped file is version controlled, so numbers verified into it
+    collide with the next `git pull` — a merge conflict on the single
+    input the tool most needs the user to correct.
+    """
+
+    def user_path(self, tmp_path, monkeypatch):
+        from betedge import parlay as P
+
+        target = tmp_path / "data" / "payouts.yaml"
+        monkeypatch.setattr(P, "USER_PAYOUTS_PATH", target)
+        return target
+
+    def test_it_writes_a_copy_the_user_owns(self, wired, tmp_path, monkeypatch, capsys):
+        cfg_path, _client, tmp_path = wired
+        target = self.user_path(tmp_path, monkeypatch)
+        assert run(["--config", str(cfg_path), "parlay", "verify-payouts",
+                    "--init"]) == 0
+        assert target.exists()
+        assert "gitignored" in capsys.readouterr().out
+
+    def test_the_copy_keeps_every_shipped_product(self, wired, tmp_path, monkeypatch):
+        from betedge.parlay import PayoutTable
+
+        cfg_path, _client, tmp_path = wired
+        target = self.user_path(tmp_path, monkeypatch)
+        run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
+        shipped = PayoutTable.load()
+        mine = PayoutTable.load(target)
+        assert set(mine.products) == set(shipped.products)
+        assert mine.get("underdog_standard").payouts == \
+            shipped.get("underdog_standard").payouts
+
+    def test_the_copy_explains_itself(self, wired, tmp_path, monkeypatch):
+        cfg_path, _client, tmp_path = wired
+        target = self.user_path(tmp_path, monkeypatch)
+        run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
+        head = target.read_text()[:600]
+        assert "git pull" in head
+        assert "verified: true" in head
+
+    def test_it_is_used_in_preference_to_the_shipped_file(
+        self, wired, tmp_path, monkeypatch, capsys
+    ):
+        from betedge.parlay import PayoutTable
+
+        cfg_path, _client, tmp_path = wired
+        target = self.user_path(tmp_path, monkeypatch)
+        run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
+        capsys.readouterr()
+        assert PayoutTable.load().path == target
+        assert PayoutTable.load().is_user_copy
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        assert "your own copy" in capsys.readouterr().out
+
+    def test_it_never_clobbers_an_existing_copy(
+        self, wired, tmp_path, monkeypatch, capsys
+    ):
+        cfg_path, _client, tmp_path = wired
+        target = self.user_path(tmp_path, monkeypatch)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("products: {}\n")
+        run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
+        assert target.read_text() == "products: {}\n"
+        assert "already exists" in capsys.readouterr().out
+
+    def test_without_a_copy_it_says_not_to_edit_the_shipped_one(
+        self, wired, capsys
+    ):
+        cfg_path, _client, _tmp = wired
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "shipped defaults" in out
+        assert "Do not edit them there" in out
+        assert "--init" in out
+
+    def test_an_explicit_config_path_still_wins(self, wired, tmp_path, capsys):
+        cfg_path, _client, tmp_path = wired
+        mine = tmp_path / "mine.yaml"
+        mine.write_text(
+            "products:\n  x:\n    book: underdog\n    kind: pickem\n"
+            "    verified: true\n    payouts:\n      2: [0, 0, 3.0]\n"
+        )
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["parlay"]["payouts_path"] = str(mine)
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        out = capsys.readouterr().out
+        assert "Every product is marked verified." in out

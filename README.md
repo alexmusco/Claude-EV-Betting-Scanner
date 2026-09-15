@@ -641,8 +641,24 @@ configured assumption is used and the leg is flagged.
 > **The shipped ladders are unverified and every ticket says so.** They
 > vary by state, change without notice, and an EV built on the wrong one is
 > not slightly wrong — a 5-pick paying 10x instead of 20x turns a good bet
-> into a bad one. Run `betedge parlay verify-payouts`, check it against
-> your account, edit the file, set `verified: true`.
+> into a bad one.
+>
+> ```bash
+> betedge parlay verify-payouts --init   # copy them to data/payouts.yaml
+> betedge parlay verify-payouts          # read what is loaded
+> ```
+>
+> `--init` first. The shipped file is version controlled, so numbers
+> verified into it collide with the next `git pull` — a merge conflict on
+> the one input the tool most needs you to get right. Your copy lives
+> under the gitignored `data/` directory and is used in preference to the
+> shipped one.
+>
+> Check the 3-pick first: it is where the two books differ most, and
+> **flex is not automatically the safer choice.** Underdog's 3-pick flex
+> needs 59.1% a leg against standard's 55.0% — insurance only pays when
+> your legs are worse, so with genuine edge the standard ladder usually
+> wins.
 
 ### Correlation: priors, then measurements — and always labelled
 
@@ -921,7 +937,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          799 tests; no network, no credits spent
+tests/          811 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 

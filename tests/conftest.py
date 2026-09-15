@@ -134,6 +134,24 @@ def no_network(monkeypatch):
     monkeypatch.setattr(requests.Session, "request", blocked)
 
 
+@pytest.fixture(autouse=True)
+def shipped_payouts(monkeypatch, tmp_path):
+    """
+    Keep the suite on the shipped payout ladders.
+
+    `PayoutTable.load()` prefers the user's own data/payouts.yaml when one
+    exists, which is right for a real install and wrong for a test run: a
+    developer who verified their own ladders would otherwise see the
+    shipped-config tests fail against numbers that are perfectly correct
+    for them.
+    """
+    from betedge import parlay
+
+    monkeypatch.setattr(
+        parlay, "USER_PAYOUTS_PATH", tmp_path / "no-user-payouts.yaml"
+    )
+
+
 @pytest.fixture
 def cfg(tmp_path):
     c = Config()

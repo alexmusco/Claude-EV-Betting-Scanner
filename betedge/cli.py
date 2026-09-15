@@ -1296,8 +1296,12 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
     """
     from . import parlay as P
 
+    if args.init:
+        return _init_payouts(cfg)
+
     table = P.PayoutTable.load(cfg.parlay.payouts_path)
-    print(f"Payout table: {table.path}")
+    origin = "your own copy" if table.is_user_copy else "shipped defaults"
+    print(f"Payout table: {table.path}  ({origin})")
     print(f"Last verified by you: {table.last_verified_by_user or 'never'}\n")
 
     for key in sorted(table.products):
@@ -1328,13 +1332,68 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
         print(
             "CHECK THESE BEFORE TRUSTING ANY EV NUMBER:\n  "
             + ", ".join(table.unverified)
-            + f"\n\nOpen your account, read what a 2-pick, a 3-pick and a "
-            "5-pick actually pay\nin your state, edit "
-            f"{table.path}\nto match, and set `verified: true` on the ones you "
-            "checked."
         )
+        if table.is_user_copy:
+            print(
+                f"\nOpen your account, read what a 2-pick, a 3-pick and a "
+                f"5-pick actually pay\nin your state, edit {table.path}\n"
+                "to match, and set `verified: true` on the ones you checked."
+            )
+        else:
+            # Never send anyone to edit the shipped file: it is version
+            # controlled, so their verified numbers would collide with the
+            # next pull -- a merge conflict on the one input the tool most
+            # needs them to get right.
+            print(
+                "\nThese are the SHIPPED defaults, inside the repository. Do "
+                "not edit them there --\nthe next `git pull` would collide "
+                "with your numbers. Make your own copy first:\n\n"
+                "    betedge parlay verify-payouts --init\n\n"
+                f"That writes {P.USER_PAYOUTS_PATH} (gitignored, alongside "
+                "your database),\nwhich is then used in preference to the "
+                "shipped file."
+            )
     else:
         print("Every product is marked verified.")
+    return 0
+
+
+def _init_payouts(cfg: Config) -> int:
+    """Copy the shipped ladders somewhere the user can safely edit them."""
+    from . import parlay as P
+
+    target = P.USER_PAYOUTS_PATH
+    if target.exists():
+        print(
+            f"{target} already exists -- leaving it alone.\n"
+            "Edit it directly; it is already used in preference to the "
+            "shipped file."
+        )
+        return 0
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shipped = P.PAYOUTS_PATH.read_text()
+    header = (
+        "# YOUR payout ladders. Copied from the betedge defaults and used in\n"
+        "# preference to them, so `git pull` can never touch these numbers.\n"
+        "#\n"
+        "# Open your account, read what each entry size actually pays in your\n"
+        "# state, correct the numbers below, and set `verified: true` on the\n"
+        "# products you checked. Until you do, every ticket built from them\n"
+        "# carries a `payout_table_unverified` flag.\n"
+        "#\n"
+        "# Check the 3-pick first: it is where the two books differ most.\n"
+        "\n"
+    )
+    target.write_text(header + shipped)
+    print(
+        f"Wrote {target}.\n\n"
+        "It is used in preference to the shipped file from now on, and it is\n"
+        "gitignored, so your numbers survive every update.\n\n"
+        "Now open your accounts and correct it. Check the 3-pick first --\n"
+        "PrizePicks pays 5x and Underdog 6x on the shipped numbers, which is a\n"
+        "3.5-point difference in the hit rate each one needs."
+    )
     return 0
 
 
@@ -1607,6 +1666,10 @@ def build_parser() -> argparse.ArgumentParser:
         "verify-payouts",
         help="print the payout table so it can be checked against your account",
     )
+    s.add_argument("--init", action="store_true",
+                   help="copy the shipped ladders to data/payouts.yaml, where "
+                        "you can edit them without a git pull overwriting your "
+                        "numbers")
     s.set_defaults(func=cmd_parlay_verify_payouts)
 
     s = psub.add_parser("bet", help="log a multi-leg entry you placed")

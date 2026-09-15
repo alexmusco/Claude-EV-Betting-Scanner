@@ -86,6 +86,16 @@ log = logging.getLogger(__name__)
 
 PAYOUTS_PATH = Path(__file__).parent / "data" / "payouts.yaml"
 
+#: Where YOUR verified ladders live, checked before the shipped ones.
+#:
+#: Outside the package on purpose. The shipped file is version controlled,
+#: so numbers verified into it collide with the next `git pull` -- and the
+#: one input the tool most needs you to correct is the worst possible place
+#: to put a merge conflict. This path sits under the gitignored data/
+#: directory alongside the database, and `parlay verify-payouts --init`
+#: creates it.
+USER_PAYOUTS_PATH = Path("data") / "payouts.yaml"
+
 KIND_PICKEM = "pickem"
 KIND_PARLAY = "parlay"
 
@@ -278,10 +288,22 @@ class PayoutTable:
     products: dict[str, Product]
     path: Path | None = None
     last_verified_by_user: Any = None
+    #: True when the ladders came from the user's own file rather than the
+    #: shipped defaults.
+    is_user_copy: bool = False
+
+    @classmethod
+    def resolve_path(cls, path: str | Path | None = None) -> tuple[Path, bool]:
+        """Explicit path, else the user's own copy, else what ships."""
+        if path:
+            return Path(path), True
+        if USER_PAYOUTS_PATH.exists():
+            return USER_PAYOUTS_PATH, True
+        return PAYOUTS_PATH, False
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "PayoutTable":
-        p = Path(path or PAYOUTS_PATH)
+        p, is_user = cls.resolve_path(path)
         raw = yaml.safe_load(p.read_text()) or {}
         declared: dict[str, dict] = raw.get("products") or {}
         products: dict[str, Product] = {}
@@ -342,6 +364,7 @@ class PayoutTable:
             products=products,
             path=p,
             last_verified_by_user=meta.get("last_verified_by_user"),
+            is_user_copy=is_user,
         )
 
     def get(self, key: str) -> Product:
