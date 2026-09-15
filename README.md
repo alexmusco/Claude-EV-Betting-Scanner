@@ -693,6 +693,45 @@ Ranking is always by expected value. **A 20x ticket at −8% is a worse bet
 than a 3x at +4%**, and nothing in the output is sorted in a way that says
 otherwise.
 
+### Profiles, so a recurring situation is one flag
+
+A Thursday night game is a single event ~57 hours out, which the 48-hour
+NFL prop window excludes — so a scan on the Tuesday finds nothing and
+looks broken. Rather than edit the config and edit it back:
+
+```bash
+betedge profiles                        # what exists, and what each would change
+betedge parlay scan --profile nfl-week  # apply one
+```
+
+`nfl-week` widens the look-ahead to 72 hours, drops the narrow
+five-market override for the full registry list (13 markets, and a single
+prime-time game costs 13 credits), and deepens the search since one game
+is one group. Run it midweek and the 72-hour horizon isolates the Thursday
+game on its own; run it Thursday or Friday and Sunday comes in with it.
+
+**Every override is printed before the scan runs:**
+
+```
+Profile 'nfl-week' applied:
+  sports                              [baseball_mlb, americanfootball_nfl] -> [americanfootball_nfl]
+  prop_windows.americanfootball_nfl   48 -> 72
+  prop_markets.americanfootball_nfl   5 items -> full registry list
+  parlay.max_candidates_per_group     32 -> 48
+```
+
+That is not decoration. A profile can reach the staking fractions and the
+guard thresholds, and a scan running under settings nobody stated is the
+same class of failure as a stale roster — so it says what moved and what
+it was before. A profile naming a setting that does not exist is an error
+that names the valid ones, never a silent shrug.
+
+Define your own under `profiles:` in `config.yaml`; a profile of the same
+name replaces the shipped one. It may set `sports`, `core_sports`, the
+per-sport `prop_markets` / `prop_windows` / `core_markets` maps (where
+`null` removes your override and falls back to the registry), and fields
+under `model:`, `parlay:`, `bankroll:` and `budget:`.
+
 ### Which sports
 
 NBA, NFL, MLB and NHL — the leagues where Pinnacle and DraftKings both
@@ -752,7 +791,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          626 tests; no network, no credits spent
+tests/          656 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 
@@ -767,6 +806,7 @@ pytest
 
 | Command | Cost | What it does |
 |---|---|---|
+| `bet profiles` | free | Named override bundles, and what each would change against your config |
 | `bet daily` | budgeted | Closing lines, then a budgeted scan, then a shortlist. The one to run. |
 | `bet budget` | free | Credits left, today's allowance, recent spending |
 | `bet quota` | free | What your config costs and how often you can run it |

@@ -2,6 +2,7 @@
 Command line interface.
 
     betedge daily                         the one you want: budgeted scan + shortlist
+    betedge profiles                      named override bundles, e.g. nfl-week
     betedge budget                        credits left, and today's allowance
     betedge sports                        list live sport keys and prop coverage
     betedge quota                         check credits (free)
@@ -75,6 +76,27 @@ def current_budget(cfg: Config, db: Database, client: OddsApiClient | None = Non
         api_remaining=client.quota.remaining if client is not None else None,
         now=now,
     )
+
+
+def _apply_profile(cfg: Config, name: str | None) -> None:
+    """
+    Apply a --profile and state exactly what it moved.
+
+    Printed, never silent. A profile can reach the staking fractions and
+    the guard thresholds, so a scan running under settings the user did
+    not state is the same failure as a stale roster: confident output with
+    an input nobody checked.
+    """
+    if not name:
+        return
+    changes = cfg.apply_profile(name)
+    if not changes:
+        print(f"Profile '{name}' applied; nothing differed from your config.\n")
+        return
+    print(f"Profile '{name}' applied:")
+    for change in changes:
+        print(f"  {change.describe()}")
+    print()
 
 
 def _log_spend(db: Database, client: OddsApiClient, command: str,
@@ -211,6 +233,7 @@ def cmd_quota(cfg: Config, args) -> int:
 
 
 def cmd_scan(cfg: Config, args) -> int:
+    _apply_profile(cfg, args.profile)
     if args.sports:
         cfg.sports = args.sports
     if args.min_ev is not None:
@@ -296,6 +319,7 @@ def cmd_daily(cfg: Config, args) -> int:
     a shortlist you can act on, and captures closing lines for anything
     already bet. The intent is that this is the only command you run.
     """
+    _apply_profile(cfg, args.profile)
     if args.bankroll is not None:
         cfg.bankroll.amount = args.bankroll
     if args.min_ev is not None:
@@ -636,6 +660,7 @@ def cmd_export(cfg: Config, args) -> int:
 def cmd_parlay_scan(cfg: Config, args) -> int:
     from . import parlay as P
 
+    _apply_profile(cfg, args.profile)
     if args.sports:
         cfg.sports = args.sports
     if args.products:
@@ -916,6 +941,54 @@ def cmd_parlay_correlations(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_profiles(cfg: Config, args) -> int:
+    """List the named override bundles and exactly what each one changes."""
+    if not cfg.profiles:
+        print("No profiles defined.")
+        return 0
+
+    for name in sorted(cfg.profiles):
+        spec = cfg.profiles[name]
+        print(f"{name}")
+        description = " ".join((spec.get("description") or "").split())
+        if description:
+            for line in _wrap(description, 74):
+                print(f"  {line}")
+        # Applied to a throwaway copy so listing them never mutates the
+        # config the caller is about to scan with.
+        preview = Config.load(args.config)
+        try:
+            changes = preview.apply_profile(name)
+        except ValueError as exc:
+            print(f"  BROKEN: {exc}")
+            print()
+            continue
+        if changes:
+            print("  changes against your current config:")
+            for change in changes:
+                print(f"    {change.describe()}")
+        else:
+            print("  nothing would change against your current config.")
+        print()
+
+    print("Apply one with, for example:  betedge parlay scan --profile nfl-week")
+    print("Define your own under `profiles:` in config.yaml.")
+    return 0
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    lines, current = [], ""
+    for word in text.split():
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
+
+
 def cmd_parlay_rosters(cfg: Config, args) -> int:
     """
     What is known about who plays for whom, and how stale it is.
@@ -1131,6 +1204,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="budgeted scan + shortlist + closing lines. The one to run.",
     )
     s.add_argument("--limit", type=int, default=12, help="rows in the shortlist")
+    s.add_argument("--profile", metavar="NAME",
+                   help="apply a named bundle of overrides before scanning, "
+                        "e.g. nfl-week. Every change it makes is printed. "
+                        "See `betedge profiles`.")
     s.add_argument("--bankroll", type=float)
     s.add_argument("--min-ev", type=float, help="e.g. 0.03 for +3%%")
     s.add_argument("--max-events", type=int,
@@ -1142,6 +1219,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hide-suspect", action="store_true")
     s.add_argument("--no-report", action="store_true")
     s.set_defaults(func=cmd_daily)
+
+    s = sub.add_parser(
+        "profiles",
+        help="named bundles of config overrides, and what each one changes",
+    )
+    s.set_defaults(func=cmd_profiles)
 
     s = sub.add_parser("budget", help="credits left and today's allowance")
     s.add_argument("--days", type=int, default=14,
@@ -1158,6 +1241,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("scan", help="find and rank bets")
     s.add_argument("--sports", nargs="+", help="override configured sports")
     s.add_argument("--min-ev", type=float, help="e.g. 0.03 for +3%%")
+    s.add_argument("--profile", metavar="NAME",
+                   help="apply a named bundle of overrides before scanning, "
+                        "e.g. nfl-week. Every change it makes is printed. "
+                        "See `betedge profiles`.")
     s.add_argument("--bankroll", type=float)
     s.add_argument("--limit", type=int, default=40)
     s.add_argument("--max-events", type=int, help="cap events per sport (saves credits)")
@@ -1234,6 +1321,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sports", nargs="+", help="override configured sports")
     s.add_argument("--products", nargs="+", metavar="KEY",
                    help="payout structures to build for, e.g. underdog_standard")
+    s.add_argument("--profile", metavar="NAME",
+                   help="apply a named bundle of overrides before scanning, "
+                        "e.g. nfl-week. Every change it makes is printed. "
+                        "See `betedge profiles`.")
     s.add_argument("--limit", type=int, default=8, help="tickets to print")
     s.add_argument("--bankroll", type=float)
     s.add_argument("--min-ev", type=float, help="e.g. 0.03 for +3%%")

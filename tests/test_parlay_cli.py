@@ -821,3 +821,72 @@ class TestCoverageByBookCommand:
              "--sports", "americanfootball_nfl", "--max-events", "1"])
         # One per-event call, billed by markets returned, not by book count.
         assert client.calls["event_odds"] == 1
+
+
+class TestProfileFlag:
+    def test_a_profile_brings_a_thursday_game_into_range(self, wired, capsys):
+        # 60 hours out: outside the 48-hour NFL prop window, inside the
+        # 72-hour one the profile sets. This is the whole reason it exists.
+        cfg_path, client, _tmp = wired
+        far = prop_event(commence_hours=60)
+        client._events = {"americanfootball_nfl": [
+            {"id": "kc1", "commence_time": (NOW + timedelta(hours=60)).isoformat()}
+        ]}
+        client._event_odds = {("americanfootball_nfl", "kc1"): far}
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["prop_windows"] = {"americanfootball_nfl": 48}
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        assert "0 legs built" in capsys.readouterr().out
+
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report",
+             "--profile", "nfl-week"])
+        out = capsys.readouterr().out
+        assert "0 legs built" not in out
+        assert "legs built" in out
+
+    def test_it_prints_every_override_it_applied(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["prop_windows"] = {"americanfootball_nfl": 48}
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report",
+             "--profile", "nfl-week"])
+        out = capsys.readouterr().out
+        assert "Profile 'nfl-week' applied:" in out
+        assert "prop_windows.americanfootball_nfl" in out
+        assert "48 -> 72" in out
+
+    def test_an_unknown_profile_fails_clearly(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        assert run(["--config", str(cfg_path), "parlay", "scan",
+                    "--profile", "nonsense"]) == 1
+        assert "unknown profile" in capsys.readouterr().err
+
+    def test_the_profiles_command_lists_and_diffs_them(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        assert run(["--config", str(cfg_path), "profiles"]) == 0
+        out = capsys.readouterr().out
+        assert "nfl-week" in out
+        assert "changes against your current config" in out
+        assert "Thursday night game" in out
+
+    def test_listing_profiles_does_not_mutate_anything(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        run(["--config", str(cfg_path), "profiles"])
+        capsys.readouterr()
+        # A scan straight afterwards must still use the unprofiled config.
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        assert "Profile" not in capsys.readouterr().out
+
+    def test_the_profiles_command_costs_nothing(self, wired):
+        cfg_path, client, _tmp = wired
+        run(["--config", str(cfg_path), "profiles"])
+        assert client.quota.spent_this_session == 0
+
+    def test_the_flag_reaches_the_other_scan_commands(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        run(["--config", str(cfg_path), "scan", "--no-report",
+             "--profile", "nfl-week"])
+        assert "Profile 'nfl-week' applied:" in capsys.readouterr().out

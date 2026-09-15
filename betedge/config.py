@@ -3,13 +3,78 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
+PROFILES_PATH = Path(__file__).parent / "data" / "profiles.yaml"
+
+#: Config sections a profile may reach into, field by field.
+_PROFILE_SECTIONS = ("model", "parlay", "bankroll", "budget", "books", "api")
+#: Per-sport dictionaries a profile merges into rather than replaces. A
+#: value of None removes the user's override, falling back to the registry.
+_PROFILE_MAPPINGS = ("prop_markets", "prop_windows", "core_markets")
+#: Plain lists a profile replaces outright.
+_PROFILE_LISTS = ("sports", "core_sports", "excluded_sports")
+
+
+@dataclass(frozen=True)
+class ProfileChange:
+    """One override a profile applied, and what the value was before."""
+
+    path: str
+    before: Any
+    after: Any
+
+    def _absent(self) -> str:
+        """
+        What "not set" falls back to, which differs by setting -- and
+        saying "registry default" for a look-ahead window, where absent
+        actually means the global horizon, would be a small confident lie
+        in a line whose whole job is to be checkable.
+        """
+        if self.path.startswith(("prop_markets.", "core_markets.")):
+            return "full registry list"
+        if self.path.startswith("prop_windows."):
+            return "the global look-ahead"
+        return "not set"
+
+    def _render(self, value: Any) -> str:
+        if value is None:
+            return self._absent()
+        if isinstance(value, (list, tuple)):
+            if len(value) > 3:
+                return f"{len(value)} items"
+            return "[" + ", ".join(str(v) for v in value) + "]"
+        return str(value)
+
+    def describe(self) -> str:
+        return f"{self.path:<38} {self._render(self.before)} -> {self._render(self.after)}"
+
+
+def load_profiles(path: str | Path | None = None) -> dict[str, dict]:
+    """
+    Shipped profiles, with any the user defined layered on top.
+
+    A profile of the same name in config.yaml replaces the shipped one
+    outright rather than merging with it, so a user editing a profile is
+    never fighting a default they cannot see.
+    """
+    profiles: dict[str, dict] = {}
+    shipped = Path(PROFILES_PATH)
+    if shipped.exists():
+        raw = yaml.safe_load(shipped.read_text()) or {}
+        profiles.update(raw.get("profiles") or {})
+    if path is not None:
+        p = Path(path)
+        if p.exists():
+            raw = yaml.safe_load(p.read_text()) or {}
+            profiles.update(raw.get("profiles") or {})
+    return profiles
+
 
 
 @dataclass
@@ -280,6 +345,11 @@ class Config:
     # returned, so asking MMA for spreads and totals it does not price costs
     # two credits a sweep for nothing.
     core_markets: dict[str, list[str]] = field(default_factory=dict)
+    #: Named bundles of overrides, applied with --profile. The shipped
+    #: ones in betedge/data/profiles.yaml are a default like the payout
+    #: table, so they are present on a bare Config() too; a `profiles:`
+    #: key in config.yaml adds to them or replaces one by name.
+    profiles: dict[str, dict] = field(default_factory=load_profiles)
     database: str = "data/betedge.db"
     reports_dir: str = "reports"
 
@@ -307,9 +377,92 @@ class Config:
             prop_markets=raw.get("prop_markets", {}) or {},
             prop_windows=raw.get("prop_windows", {}) or {},
             core_markets=raw.get("core_markets", {}) or {},
+            profiles=load_profiles(path),
             database=raw.get("database", "data/betedge.db"),
             reports_dir=raw.get("reports_dir", "reports"),
         )
+
+    def apply_profile(self, name: str, profiles: dict | None = None) -> list[ProfileChange]:
+        """
+        Apply a named bundle of overrides, returning every change it made.
+
+        The return value is the point. A profile can reach the staking
+        fractions and the guard thresholds, and a silent change to either
+        is exactly what the rest of this tool refuses to do -- so callers
+        print what moved and what it was before, rather than letting a
+        scan quietly run under settings nobody stated.
+
+        An unrecognised field is an error naming the valid ones. A typo in
+        a profile that was ignored would be indistinguishable from a
+        setting that did not work.
+        """
+        profiles = self.profiles if profiles is None else profiles
+        try:
+            spec = profiles[name]
+        except KeyError as exc:
+            raise ValueError(
+                f"unknown profile {name!r}. Available: "
+                f"{sorted(profiles) or 'none'}. Run `betedge profiles` to see "
+                "what each one does, or define your own under `profiles:` in "
+                "config.yaml."
+            ) from exc
+
+        changes: list[ProfileChange] = []
+
+        for key, value in spec.items():
+            if key == "description":
+                continue
+
+            if key in _PROFILE_LISTS:
+                before = list(getattr(self, key))
+                if before != list(value):
+                    setattr(self, key, list(value))
+                    changes.append(ProfileChange(key, before, list(value)))
+
+            elif key in _PROFILE_MAPPINGS:
+                mapping = dict(getattr(self, key))
+                for sport, override in (value or {}).items():
+                    before = mapping.get(sport)
+                    if override is None:
+                        # Remove the user's narrowing and fall back to the
+                        # registry default, which is what `null` means here.
+                        if sport in mapping:
+                            mapping.pop(sport)
+                            changes.append(
+                                ProfileChange(f"{key}.{sport}", before, None)
+                            )
+                    elif before != override:
+                        mapping[sport] = override
+                        changes.append(
+                            ProfileChange(f"{key}.{sport}", before, override)
+                        )
+                setattr(self, key, mapping)
+
+            elif key in _PROFILE_SECTIONS:
+                section = getattr(self, key)
+                valid = {f.name for f in fields(section)}
+                for field_name, override in (value or {}).items():
+                    if field_name not in valid:
+                        raise ValueError(
+                            f"profile {name!r} sets {key}.{field_name}, which "
+                            f"is not a setting. Valid {key} settings: "
+                            f"{sorted(valid)}"
+                        )
+                    before = getattr(section, field_name)
+                    if before != override:
+                        setattr(section, field_name, override)
+                        changes.append(
+                            ProfileChange(f"{key}.{field_name}", before, override)
+                        )
+
+            else:
+                raise ValueError(
+                    f"profile {name!r} sets {key!r}, which a profile cannot "
+                    f"change. It may set: description, "
+                    f"{', '.join(sorted(_PROFILE_LISTS + _PROFILE_MAPPINGS + _PROFILE_SECTIONS))}."
+                )
+
+        return changes
 
     def markets_for_sport(self, sport: str, include_alternate: bool = False) -> list[str]:
         """

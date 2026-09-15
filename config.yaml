@@ -203,6 +203,35 @@ prop_windows:
   americanfootball_nfl: 48
 
 # ---------------------------------------------------------------------------
+# SCAN PROFILES: named bundles of overrides, applied with --profile.
+#
+# For a recurring situation that would otherwise mean editing this file and
+# then editing it back. The one that prompted it: a Thursday night game is
+# a single event about 57 hours out, which the 48-hour NFL prop window
+# below excludes entirely -- so a scan on the Tuesday finds nothing and
+# looks broken.
+#
+#   betedge profiles                        what exists, and what each
+#                                           one would change against THIS file
+#   betedge parlay scan --profile nfl-week  apply one
+#
+# `nfl-week` ships with betedge (see betedge/data/profiles.yaml). Define
+# your own here; a profile of the same name replaces the shipped one.
+#
+# Every override a profile applies is printed before the scan runs. A
+# profile can reach the staking fractions and the guard thresholds, and a
+# silent change to either is exactly what the rest of this tool refuses to
+# do, so the run states what moved and what it was before.
+#
+# profiles:
+#   mlb-tonight:
+#     description: Just tonight's slate, pitchers only.
+#     sports: [baseball_mlb]
+#     prop_windows: {baseball_mlb: 6}
+#     prop_markets: {baseball_mlb: [pitcher_strikeouts, pitcher_outs]}
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # MULTI-LEG TICKETS: pick'em entries and parlays.
 #
 # A different objective from everything above. The single-bet scanner looks

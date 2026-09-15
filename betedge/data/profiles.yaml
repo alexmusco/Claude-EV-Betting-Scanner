@@ -1,0 +1,68 @@
+# ===========================================================================
+# SCAN PROFILES
+#
+# A named bundle of config overrides, applied with --profile, so a
+# recurring situation does not need the config file edited and then edited
+# back. The situation that prompted this: a Thursday night game is a
+# single event ~57 hours out, which the 48-hour NFL prop window excludes
+# entirely -- so a scan on Tuesday finds nothing and looks broken.
+#
+#   betedge profiles                        what is available
+#   betedge parlay scan --profile nfl-week  apply one
+#
+# Every override a profile applies is PRINTED before the scan runs. A
+# profile can reach the staking and guard settings, and a silent change to
+# either is exactly the kind of thing the rest of this tool refuses to do,
+# so the run states what it changed and what the value was before.
+#
+# Add your own under a `profiles:` key in config.yaml; anything there
+# overrides a profile of the same name shipped here.
+#
+# ---------------------------------------------------------------------------
+# WHAT A PROFILE MAY SET
+#
+#   description            free text, shown by `betedge profiles`
+#   sports, core_sports    replaced outright
+#   prop_markets           merged per sport. `null` REMOVES your override,
+#   prop_windows           falling back to the full registry list
+#   core_markets           (markets.py) or the global window
+#   model:, parlay:,       merged field by field; an unknown field is an
+#   bankroll:, budget:     error naming the valid ones, never ignored
+# ===========================================================================
+
+profiles:
+
+  nfl-week:
+    description: >
+      One NFL game or a whole week of them, with every prop market
+      Pinnacle prices. Widens the look-ahead from 48 to 72 hours, which is
+      what brings a Thursday night game into range when you scan on the
+      Tuesday or Wednesday before it -- at 48 hours it is simply not
+      there. Run midweek and the 72-hour horizon isolates the Thursday
+      game on its own; run on Thursday or Friday and the Sunday slate
+      comes in with it.
+
+      Also drops the narrow five-market override, because that list exists
+      to keep a full Sunday slate affordable and a single prime-time game
+      costs thirteen credits at the full list. More markets means more
+      legs, and a one-game pool needs every leg it can get.
+
+    sports:
+      - americanfootball_nfl
+
+    prop_windows:
+      # 48h excludes a Thursday game until Tuesday evening. Midweek NFL
+      # lines are placeholders on a Sunday slate, which is why the default
+      # is tight -- but a prime-time game is priced properly days out.
+      americanfootball_nfl: 72
+
+    prop_markets:
+      # null means "no override": use the full registry list from
+      # markets.py rather than the narrow one in config.yaml.
+      americanfootball_nfl: null
+
+    parlay:
+      # One game is one search group, so there is no slate to spread the
+      # work across -- spend it on a deeper pool from the single game.
+      max_candidates_per_group: 48
+      beam_width: 32
