@@ -1,12 +1,10 @@
 # betedge
 
-Finds positive expected value bets by stripping the vig out of a sharp
-book's prices (Pinnacle) and comparing the result to softer books
-(DraftKings, Underdog). Logs everything it flags, tracks what you actually
-bet, and measures closing-line value so you can tell whether the model
-works long before the profit and loss says so.
-
-Rebuilt from the R prop scanner, with the pricing fixed and guards added.
+Finds positive expected value bets by stripping the vig out of Pinnacle's
+prices and comparing the result to DraftKings. Ranks what it finds by how
+much the number can be trusted, sizes the bets, paces itself against a
+monthly credit budget, and measures closing-line value so you can tell
+whether the model works long before the profit and loss says so.
 
 ---
 
@@ -21,49 +19,172 @@ dependencies, checks the API key in `.env`, finds your database if it got
 left behind in an older copy of the folder, and offers to add the `bet`
 shell alias with the right absolute path filled in.
 
-It `cd`s to its own directory first, so it works no matter which folder you
-run it from — which is the usual cause of
-`no such file or directory: .venv/bin/activate`.
-
 **Run it again after every update.** New versions sometimes add a
 dependency, and this is what puts it in place.
 
-Doing it by hand instead:
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 -m betedge quota          # free — confirms the key works
-```
+Then set one thing — `bankroll.amount` in `config.yaml` — to what you are
+actually willing to lose. Everything else has a defensible default.
 
 ---
 
 ## Daily use
 
+One command:
+
 ```bash
-python -m betedge scan                     # scan the configured sports
-python -m betedge scan --sports basketball_nba --min-ev 0.03
-python -m betedge scan --max-events 5      # cap the credit burn
-
-python -m betedge bet 42 --stake 150       # log a bet on opportunity #42
-python -m betedge bet 42 --stake 150 --price 2.05   # if the price moved
-
-python -m betedge settle 7 won             # won | lost | push | void | half_won | half_lost
-
-python -m betedge close                    # capture closing lines
-python -m betedge report                   # performance and CLV
-python -m betedge export bets.csv
+bet daily
 ```
 
-Every scan writes `reports/scan_<timestamp>.html` and records itself in
-`data/betedge.db`.
-
-Run `close` on a schedule so closing lines actually get captured — props
-are usually pulled at tip-off, so there is no catching up afterwards:
+It works out what today's credits allow, captures closing lines for bets
+you already have on, scans cheapest-markets-first inside that allowance,
+and prints a shortlist:
 
 ```
-*/15 * * * * cd /path/to/betedge && .venv/bin/python -m betedge close
+Cycle       01 Sep to 01 Oct   (15.8 days left)
+Remaining   18,000 of 20,000 (API)
+Spent       2,000 this cycle, 0 today
+Pace        1,091/day even; today's allowance 2,181
+Available   2,181 credits for this run
+
+ id      EV  liq    bet                              price   stake  game
+------------------------------------------------------------------------
+  1  +5.0%  deep   Kansas City Chiefs ML       2.10 (+110)      25  DEN @ KC (16.5h)
+  2  +7.2%  thin   Y. Yamamoto Over 6.5        2.10 (+110)      35  SD @ LAD (12.5h)
+  3  +3.0%  deep   Kansas City Chiefs ML       2.06 (+106)      15  DEN @ KC (16.5h)
+
+3 playable, showing 3. Total recommended stake 75.
+The id column is what `betedge bet <id> --stake <amount>` takes.
 ```
+
+Then log what you actually got down:
+
+```bash
+bet bet 1 --stake 25            # the id from the list
+bet bet 1 --stake 25 --price 2.05   # if the price moved before you clicked
+bet settle 1 won                # won | lost | push | void | half_won | half_lost
+```
+
+And periodically:
+
+```bash
+bet budget          # credits left, today's allowance, recent spending
+bet quota           # what your config costs, and how often you can run it
+bet report          # performance and closing-line value
+bet show            # re-print the last scan
+bet export ~/Desktop/AlexBetTracker.xlsx
+```
+
+### Run it hourly, not daily
+
+The name is misleading in one direction: `daily` is safe to run as often as
+you like, because the budget governor decides what each run may spend. And
+you should, because a soft-book edge often lives for minutes rather than
+hours. A game-level sweep of the whole configured board costs about 19
+credits, which on a 20,000 plan is roughly 33 sweeps an hour if you wanted
+them.
+
+```
+0 * * * * cd /path/to/betedge && .venv/bin/python -m betedge daily --no-report >> data/cron.log 2>&1
+```
+
+`bet quota` tells you exactly what your configuration affords.
+
+---
+
+## The credit budget
+
+The Odds API sells credits monthly. 20,000 sounds generous until one
+careless prop scan of a full NFL Sunday across every market takes 2,400 of
+them, or a cron job stuck in a loop takes the rest.
+
+There were already two guards: a ceiling on what one scan may cost, and a
+floor of credits it refuses to drop below. Both catch a single runaway
+call. Neither catches the slower failure, which is spending three weeks of
+quota in the first four days and going dark.
+
+So spend is now paced against a billing cycle:
+
+```
+remaining credits ÷ days left  →  even pace
+even pace × burst factor       →  today's allowance
+allowance − spent today        →  what this run may cost
+```
+
+Three things worth knowing about how it behaves:
+
+- **The provider's count is the truth.** Every API response carries
+  `x-requests-remaining`. That is what `remaining` uses, so the plan cannot
+  drift the way a local tally would. The local ledger (`credit_spend` in
+  the database) records where credits went, which the header cannot tell
+  you.
+
+- **Unspent credits roll forward with no special handling.** A quiet day
+  leaves `remaining` higher than the even pace assumed, so tomorrow's pace
+  rises on its own.
+
+- **Overspending throttles itself.** Burn two-thirds of the month in the
+  first week and the remaining pace drops accordingly — no intervention,
+  no separate alarm.
+
+The burst factor (default 2.0) lets a day spend twice the even pace,
+because opportunity is not spread evenly: an NFL Sunday is worth more
+credits than a Tuesday in September. A reserve (default 800) is held back
+so closing-line capture is never starved by scanning — CLV is the only
+fast evidence the model works, so it gets paid first.
+
+---
+
+## Why the list is not sorted by EV
+
+Ranking opportunities by raw expected value sorts the board in almost
+exactly the wrong order.
+
+The biggest apparent edges cluster in the thinnest markets — alternate
+lines, obscure props, markets posted days before the event — because that
+is where Pinnacle's own price is least certain and where a stale quote
+survives longest. A scanner that ranks on EV alone hands you a list sorted
+by *how likely this number is to be wrong*, which correlates with, but is
+not, *how much money is here*.
+
+The fix is to stop treating the de-vigged Pinnacle probability as truth and
+start treating it as an estimate with error. That error is small on a
+market Pinnacle will take $50,000 on and large on one it will take $250 on.
+A +3% edge against a high-limit number is worth more than a +6% edge
+against a low-limit one, because the 6% is mostly estimation error.
+
+The API does not publish limits. Three observable proxies stand in:
+
+| Signal | Why it works |
+|---|---|
+| **Pinnacle's own margin**, per outcome | Pinnacle sets margin inversely to limit as policy: ~2% on a game side it takes five figures on, 5–7% on a prop it takes a few hundred. A tight margin is Pinnacle telling you it is confident. |
+| **Market tier** | Game sides and totals are where sharp money concentrates. Primary props are heavily bet but an order of magnitude thinner. Alternate lines are thinner again. |
+| **Time to start** | Limits rise and prices converge as an event approaches. A prop posted Tuesday for a Sunday game is a placeholder. |
+
+A fourth adjustment is about the maths rather than the market: on lopsided
+prices the de-vig methods disagree most, so a fair probability near 0 or 1
+carries more model risk regardless of liquidity. Anytime-touchdown and
+similar yes/no longshots live here.
+
+These combine into a 0–1 score used two ways:
+
+- **A sliding EV bar.** Game lines flag at **+2%**, primary props at about
+  **+3%**, alternate lines at about **+4.5%**. This is the Bayesian-correct
+  response to a noisier estimate, not timidity: if your fair probability
+  could be off by two points, a two-point edge is not an edge.
+
+- **Ranked ordering.** `edge_score = EV × liquidity` is what the reports
+  sort on. A +3% NFL side scores 0.030 and outranks a +5% alternate prop at
+  0.018.
+
+Nothing is thrown away — raw EV is still recorded and still shown, and the
+`liq` column tells you which kind of bet you are looking at. Set
+`model.liquidity_ev_penalty: 0` for one flat bar across every market, or
+`model.min_liquidity: 0.30` to drop the thin stuff entirely.
+
+This is also, incidentally, the honest answer to "is more volume better?"
+Yes — but not because thin markets are less profitable in principle. It is
+because in a thin market you cannot tell profit from noise, and the number
+you are betting into is one the sharp book itself is not confident in.
 
 ---
 
@@ -103,7 +224,7 @@ default is `worst_case` — take the lowest fair probability any method
 gives, so a bet only clears the bar if it clears it on every method.
 
 (Worth knowing: for two-outcome markets, Shin is algebraically identical to
-the additive method. The tests verify this to 1e-13. It only earns its keep
+the additive method. The tests verify this to 1e-12. It only earns its keep
 on three-way soccer markets.)
 
 **Sanity guards.** The old model had one good guard —
@@ -117,6 +238,7 @@ on three-way soccer markets.)
 | De-vig methods disagree by >4pp → skip | Your fair estimate is method-dependent, so it isn't an estimate. |
 | Edge positive under some methods, negative under others → suspect | Not a real edge. |
 | Event starts in under 5 min → skip | You will not get it down. |
+| EV below the liquidity-adjusted bar → skip | See above. |
 
 Suspect rows are still shown — they are often the interesting ones — but
 get no stake recommendation.
@@ -130,19 +252,137 @@ each independently quietly overbets the portfolio — hence the total cap.
 **Credit accounting.** The old scripts sent `regions=us,eu` *and*
 `bookmakers=...`. Cost is markets × regions, and up to ten bookmakers count
 as one region, so that doubled the bill of every call for nothing. Sending
-only `bookmakers` halves the cost. The client also reads `x-requests-last`
-off each response, so it knows the real spend rather than estimating, and
-stops when a per-scan budget or a remaining-credit floor is hit.
+only `bookmakers` halves the cost. The client reads `x-requests-last` off
+each response, so it knows the real spend rather than estimating.
 
 **Tracking.** SQLite instead of the Excel sheet. Every flagged opportunity
 is recorded, not just the bets you take — see below.
 
 ---
 
+## Two kinds of market, very different economics
+
+**Game-level markets** (`core_sports:`) — moneyline, spreads, totals — come
+off the bulk endpoint, where cost is markets × 1 for the **entire sport**.
+Every tennis match on the board, all three markets, is 3 credits. Not 3 per
+match. Three.
+
+**Player props** (`sports:`) come off the per-event endpoint and cost
+markets × events. A full MLB slate across two markets is ~30 credits;
+across all ten it is ~150. An NFL Sunday across five markets is ~70.
+
+So mainlines are roughly fifty times cheaper per opportunity. They are also
+the *deeper* markets, which under the liquidity scoring means they clear
+the bar at +2% rather than +3% or more. The old tradeoff framing — cheap
+but thinner edges — was only half right: the edges are smaller, but they
+are also far more likely to be real.
+
+The scan runs the cheap pass first, deliberately. Whichever pass runs
+second is the one a tight budget truncates, and it should not be the deep,
+well-priced one.
+
+```bash
+bet daily                                      # both passes, per config.yaml
+bet scan --core-sports "tennis_*" --no-props   # game lines only
+bet scan --markets pitcher_strikeouts          # one prop market, one run
+```
+
+A trailing `*` matches sport keys by prefix. This matters for tennis, which
+publishes one key per tournament (`tennis_atp_china_open`,
+`tennis_wta_wuhan`, …) and rotates them weekly — `tennis_*` is the only way
+to say "all tennis" that does not need editing every month. Wildcards are
+resolved against the live sport list, which is a free call.
+
+### How one code path handles all of it
+
+De-vigging needs a complete set of mutually exclusive outcomes. Those come
+in three shapes and the engine keys them uniformly:
+
+| Market | Outcomes named | Grouped by | Outcome identified by |
+|---|---|---|---|
+| Player prop | Over / Under | market, player, line | the side |
+| Game total | Over / Under | market, line | the side |
+| Moneyline | the competitors | market | competitor name |
+| Spread / handicap | the competitors | market, \|handicap\| | competitor **and** handicap |
+
+Two consequences worth knowing. A spread is only ever compared against the
+same handicap — DraftKings on −2.5 is never matched to Pinnacle on −3.5,
+the same guard that protects the props. And three-way markets need no
+special case: soccer's 1X2 is just a group with three outcomes, and the
+n-way de-vig handles it.
+
+Completeness is checked by the overround guard rather than by counting
+outcomes. An incomplete set — a one-sided prop, a 1X2 missing its draw —
+sums to less than 1 before de-vigging, which falls outside the configured
+overround band and is rejected. One rule, every market shape.
+
+---
+
+## Keeping the credit bill down
+
+Three levers, in order of effect:
+
+**1. The prop market list.** Cost is markets × events, so this is the
+single biggest one. `prop_markets` overrides the registry default per
+sport:
+
+```yaml
+prop_markets:
+  baseball_mlb:
+    - pitcher_strikeouts
+    - batter_total_bases
+```
+
+Ten markets to two takes a full MLB slate from ~150 credits to ~30.
+
+**2. The prop look-ahead window.** `prop_windows` caps how far ahead the
+prop pass looks, per sport. This filter runs on the free event list, so
+every event it drops is a per-event call never billed.
+
+```yaml
+prop_windows:
+  baseball_mlb: 8
+```
+
+MLB is the case that matters. Batter props void if the player doesn't
+start and pitcher props void on a scratched starter, so before lineups post
+— roughly 2–4 hours before first pitch — the numbers are placeholders and
+Pinnacle's limits are low. **Scan after lineups, not before.** A morning
+scan of an evening slate is mostly noise you paid for.
+
+**3. The core market list.** The bulk endpoint bills for markets
+*requested*, not returned, so asking a sport for markets it doesn't price
+is pure waste:
+
+```yaml
+core_markets:
+  mma_mixed_martial_arts:
+    - h2h
+```
+
+---
+
+## Sports
+
+Configured in `markets.py`; run `bet sports` for the live list.
+
+| Sport | Props | Note |
+|---|---|---|
+| Tennis | none | **Core markets.** Pinnacle is *the* reference book for tennis and US books lag it badly. Two-way moneylines, so the existing math applies directly. Use `tennis_*`. |
+| NBA | 12 markets | Deepest coverage both sides. Most picked-over, so edges are small but frequent. |
+| NFL | 13 markets | Props post days early; soft books lag midweek injury and weather news. |
+| NHL | 5 markets | Shots on goal and blocked shots are reliably soft. Lower volume, slower correction. |
+| MLB | 10 markets, narrow it | Pitcher strikeouts and batter total bases are the targets. Games every day, Apr–Oct. Core markets are 3 credits for the whole slate. |
+| EPL / UCL / La Liga / Serie A / Bundesliga | 3 markets | Pinnacle is very sharp on soccer but its *prop* coverage is thin. Put soccer in `core_sports`, not `sports`. |
+| NCAAB / NCAAF | inherited | The edge is in games nobody watches. Prop coverage patchy. |
+| MMA | none | Moneyline only, so `core_markets` narrows it to 1 credit. Pinnacle is sharp and soft books are slow on fight-week news. |
+
+---
+
 ## Excel tracker export
 
 ```bash
-python -m betedge export ~/Desktop/AlexBetTracker.xlsx
+bet export ~/Desktop/AlexBetTracker.xlsx
 ```
 
 Any path ending `.xlsx` fills your existing tracker from the database
@@ -170,9 +410,6 @@ the t-stat.
   propagated into Avg Return, STDEV and Sharpe, leaving all three broken.
   Now `=IFERROR(J/G,"")`.
 
-Verified by recalculating the exported workbook in LibreOffice and reading
-the analytics back.
-
 ---
 
 ## Why closing-line value is the number to watch
@@ -190,9 +427,16 @@ that a model is finding real mispricing. Consistently landing at zero CLV
 while showing a profit means you have been lucky.
 
 So `betedge` logs every opportunity it flags, not only the ones you bet,
-and `betedge close` captures the sharp price at the end. `betedge report`
-shows average CLV, the share of bets that beat the close, and your P&L
-against what the model expected.
+and captures the sharp price at the end. `bet report` shows average CLV,
+the share of bets that beat the close, and your P&L against what the model
+expected.
+
+`bet daily` captures closing lines on every run, before it scans. If you
+are running it hourly that is enough. If you run it rarely, add:
+
+```
+*/15 * * * * cd /path/to/betedge && .venv/bin/python -m betedge close
+```
 
 The honest framing: this strategy is well known, the edges are small, and
 most of the work is execution — getting a bet down before the soft book
@@ -201,125 +445,43 @@ None of the guards here can protect you from betting more than you should.
 
 ---
 
-## Two kinds of market, very different economics
-
-**Player props** (`sports:` in the config) come off the per-event endpoint
-and cost markets × events. An NFL Sunday is ~180 credits; a full MLB day
-across ten markets is ~150.
-
-**Game-level markets** (`core_sports:`) — moneyline, spreads, totals — come
-off the bulk endpoint, where cost is markets × 1 for the **entire sport**.
-Every tennis match on the board, all three markets, is 3 credits. Not 3 per
-match. Three.
-
-So mainlines are roughly fifty times cheaper per opportunity. The tradeoff
-is real: edges are thinner there, because mainlines are where the sharp
-money concentrates and the soft books pay most attention. Expect more +2.5%
-plays and fewer +6% ones. But at 3 credits a sweep you can scan constantly,
-and volume at a real 2.5% beats scarcity at an imagined 6%.
-
-```bash
-python -m betedge scan --core-sports "tennis_*" --no-props
-python -m betedge scan                         # both passes, per config.yaml
-```
-
-A trailing `*` matches sport keys by prefix. This matters for tennis, which
-publishes one key per tournament (`tennis_atp_china_open`,
-`tennis_wta_wuhan`, …) and rotates them weekly — `tennis_*` is the only way
-to say "all tennis" that does not need editing every month. Wildcards are
-resolved against the live sport list, which is a free call.
-
-### How one code path handles all of it
-
-De-vigging needs a complete set of mutually exclusive outcomes. Those come
-in three shapes and the engine keys them uniformly:
-
-| Market | Outcomes named | Grouped by | Outcome identified by |
-|---|---|---|---|
-| Player prop | Over / Under | market, player, line | the side |
-| Game total | Over / Under | market, line | the side |
-| Moneyline | the competitors | market | competitor name |
-| Spread / handicap | the competitors | market, \|handicap\| | competitor **and** handicap |
-
-Two consequences worth knowing. A spread is only ever compared against the
-same handicap — DraftKings on −2.5 is never matched to Pinnacle on −3.5,
-the same guard that protects the props. And three-way markets need no
-special case: soccer's 1X2 is just a group with three outcomes, and the
-n-way de-vig handles it (this is where Shin stops being identical to the
-additive method and starts earning its keep).
-
-Completeness is checked by the overround guard rather than by counting
-outcomes. An incomplete set — a one-sided prop, a 1X2 missing its draw —
-sums to less than 1 before de-vigging, which falls outside the configured
-overround band and is rejected. One rule, every market shape.
-
-## Narrowing the prop markets
-
-Cost is markets × events, so the market list is the single biggest lever on
-what a scan costs. `prop_markets` in the config overrides the registry
-default for one sport:
-
-```yaml
-prop_markets:
-  baseball_mlb:
-    - pitcher_strikeouts
-    - batter_total_bases
-```
-
-A full MLB slate across all ten configured markets is ~150 credits a day.
-Those two markets bring it to ~30. Sports left out of `prop_markets` use the
-full list. `--markets pitcher_strikeouts batter_total_bases` does the same
-thing for one run.
-
-### MLB specifically
-
-Lineups are the whole game. Batter props void if the player doesn't start,
-and pitcher props void on a scratched starter — so before lineups post
-(roughly 2–4 hours before first pitch) the numbers are placeholders and
-Pinnacle's limits are low. **Scan after lineups, not before.** A morning
-scan of an evening slate is mostly noise.
-
-Run lines are almost always ±1.5, which makes MLB the sport where the
-spread guard matters least and the totals guard matters most.
-
-## Sports
-
-Configured in `markets.py`; run `python -m betedge sports` for the live list.
-
-| Sport | Props | Note |
-|---|---|---|
-| Tennis | none | **Core markets.** Pinnacle is *the* reference book for tennis and US books lag it badly. Two-way moneylines, so the existing math applies directly. Use `tennis_*`. |
-| NBA | 12 markets | Deepest coverage both sides. Most picked-over, so edges are small but frequent. |
-| NFL | 13 markets | Props post days early; soft books lag midweek injury and weather news. |
-| NHL | 5 markets | Shots on goal and blocked shots are reliably soft. Lower volume, slower correction. |
-| MLB | 10 markets, narrow it | Pitcher strikeouts and batter total bases are the targets; the other eight aren't worth the credits. Games every day, Apr–Oct. Core markets are 3 credits for the whole slate. |
-| EPL / UCL / La Liga / Serie A / Bundesliga | 3 markets | Pinnacle is very sharp on soccer but its *prop* coverage is thin. Expect few matches. |
-| NCAAB / NCAAF | inherited | The edge is in games nobody watches. Prop coverage patchy. |
-| MMA | none | Moneyline only, but Pinnacle is sharp and soft books are slow on fight-week news. |
-
-On EPL specifically: prop scanning will run but mostly return nothing,
-because Pinnacle prices few player props for soccer. The genuine soccer
-edge is in core markets — 1X2, totals, Asian handicaps — so put soccer in
-`core_sports`, not `sports`.
-
----
-
 ## Layout
 
 ```
 betedge/
   pricing.py    de-vig, EV, Kelly          ← the maths, heavily tested
+  liquidity.py  how far to trust a fair price, and what edge to demand
+  budget.py     monthly credit pacing
   markets.py    sport and market registry, credit cost rules
   oddsapi.py    API client, quota tracking, caching, retries
-  scan.py       parse → group → score → guard; props and game markets
+  scan.py       parse → group → score → guard; core markets then props
   closing.py    closing-line capture
-  db.py         SQLite store and analytics
+  db.py         SQLite store, credit ledger, analytics
   report.py     console tables and HTML reports
+  tracker.py    Excel tracker export
   cli.py        commands
-tests/          287 tests; fixtures cover each decision boundary
+tests/          175 tests; no network, no credits spent
 ```
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
 ```
+
+---
+
+## Commands
+
+| Command | Cost | What it does |
+|---|---|---|
+| `bet daily` | budgeted | Closing lines, then a budgeted scan, then a shortlist. The one to run. |
+| `bet budget` | free | Credits left, today's allowance, recent spending |
+| `bet quota` | free | What your config costs and how often you can run it |
+| `bet sports` | free | Live sport keys and prop coverage |
+| `bet scan` | varies | A scan with manual flags, ignoring the daily plan |
+| `bet show` | free | Re-print a scan |
+| `bet bet <id> --stake N` | free | Log a bet you placed |
+| `bet settle <id> won` | free | Settle it |
+| `bet close` | ~1/event | Capture closing lines |
+| `bet report` | free | Performance and CLV |
+| `bet export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |

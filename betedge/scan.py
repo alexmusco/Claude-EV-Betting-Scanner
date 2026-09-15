@@ -27,7 +27,7 @@ from typing import Any, Iterable, Sequence
 
 from . import liquidity, pricing
 from .config import Config
-from .markets import core_markets_for, estimate_credits, expand_sport_keys, markets_for
+from .markets import estimate_credits, expand_sport_keys
 from .oddsapi import CreditBudgetExceeded, OddsApiClient
 
 log = logging.getLogger(__name__)

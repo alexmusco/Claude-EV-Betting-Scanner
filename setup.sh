@@ -172,11 +172,21 @@ fi
 echo
 bold "Ready."
 echo
+if grep -qE '^ *amount: *1000 *(#.*)?$' config.yaml 2>/dev/null; then
+  warn "bankroll.amount in config.yaml is still the 1000 default."
+  echo "    Set it to what you are actually willing to lose — every stake"
+  echo "    recommendation is a fraction of that number."
+  echo
+fi
 echo "  With the alias, from any folder:"
-echo "    bet scan"
-echo "    bet quota"
+echo "    bet daily        # the one to run: budgeted scan + shortlist"
+echo "    bet quota        # free — what your config costs per run"
+echo "    bet budget       # free — credits left and today's allowance"
 echo
 echo "  Without it, from this folder:"
 echo "    source .venv/bin/activate"
-echo "    python3 -m betedge scan"
+echo "    python3 -m betedge daily"
+echo
+echo "  Safe to run hourly — the budget governor decides what each run"
+echo "  may spend. See the README section on the credit budget."
 echo

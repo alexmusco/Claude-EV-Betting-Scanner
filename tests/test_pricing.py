@@ -1,8 +1,6 @@
 """The maths. These are the tests that matter most -- everything downstream
 is plumbing, but an error here silently mis-prices every bet."""
 
-import math
-
 import pytest
 
 from betedge import pricing as P

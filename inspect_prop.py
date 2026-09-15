@@ -19,10 +19,10 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
+from betedge import liquidity as L
 from betedge import pricing as P
 from betedge.config import Config
 from betedge.cli import build_client
-from betedge.markets import markets_for
 from betedge.scan import evaluate_event, pair_sharp_quotes, parse_event_odds
 
 
@@ -41,7 +41,9 @@ def main() -> int:
     needle = args.player.lower()
     now = datetime.now(timezone.utc)
 
-    markets = [args.market] if args.market else markets_for(
+    # Via the config so a narrowed `prop_markets` list is respected here
+    # too -- otherwise this tool costs far more than the scan it explains.
+    markets = [args.market] if args.market else cfg.markets_for_sport(
         sport, cfg.model.include_alternate_lines
     )
     books = cfg.books.all
@@ -118,15 +120,30 @@ def main() -> int:
                     else P.devig(prices, method=cfg.model.devig_method)[idx]
                 ev = P.expected_value(fair, q.price)
                 evs = [P.expected_value(p, q.price) for p in by.values()]
+
+                # The same liquidity-adjusted bar the engine applies. Printing
+                # the flat min_ev here would explain a rejection with a number
+                # the scanner never used.
+                liq = L.assess(
+                    market=market,
+                    overround=orr,
+                    n_outcomes=len(prices),
+                    fair_prob=fair,
+                    minutes_to_start=mins,
+                )
+                bar = L.required_ev(
+                    cfg.model.min_ev, liq.score, cfg.model.liquidity_ev_penalty
+                )
                 verdict = (
                     f"SUSPECT (EV above {cfg.model.max_plausible_ev:.0%})"
                     if ev > cfg.model.max_plausible_ev
-                    else ("FLAG" if ev >= cfg.model.min_ev else
-                          f"below the {cfg.model.min_ev:.0%} bar")
+                    else ("FLAG" if ev >= bar else f"below the {bar:.2%} bar")
                 )
                 print(f"    {q.book} {q.side} {q.price:.2f}"
                       f"  -> EV {ev:+.2%}  (range {min(evs):+.2%} to {max(evs):+.2%})"
                       f"  {verdict}")
+                print(f"      liquidity {liq.score:.2f} ({liq.label}, {liq.tier})"
+                      f"  -> bar {bar:.2%}, edge score {L.edge_score(ev, liq.score):.4f}")
 
         # ---- and what the real engine decides ----------------------------
         rej: dict[str, int] = {}

@@ -28,7 +28,7 @@ from . import report as R
 from .closing import capture_closing_lines
 from .config import Config
 from .db import Database
-from .markets import SPORTS, core_markets_for, expand_sport_keys, markets_for
+from .markets import SPORTS, expand_sport_keys, markets_for
 from .oddsapi import OddsApiClient
 from .scan import _events_in_window, best_per_selection, cap_exposure, scan
 
