@@ -1319,10 +1319,34 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
     print(f"Payout table: {table.path}  ({origin})")
     print(f"Last verified by you: {table.last_verified_by_user or 'never'}\n")
 
+    # Against the shipped defaults, so an edited ladder is visibly edited.
+    # Without this the loop has no feedback: you change a number, re-run,
+    # and the output looks exactly as it did before.
+    shipped = {}
+    if table.is_user_copy:
+        try:
+            shipped = {
+                k: v.payouts
+                for k, v in P.PayoutTable.load(P.PAYOUTS_PATH).products.items()
+            }
+        except Exception:  # noqa: BLE001
+            shipped = {}
+    untouched = []
+
     for key in sorted(table.products):
         product = table.products[key]
         mark = "verified" if product.verified else "NOT VERIFIED"
-        print(f"{key}  ({product.title}, {product.book}, {product.kind})  [{mark}]")
+        changed = ""
+        if shipped:
+            if key not in shipped:
+                changed = "  [yours only]"
+            elif shipped[key] != product.payouts:
+                changed = "  [edited]"
+            elif product.payouts:
+                changed = "  [still the shipped numbers]"
+                untouched.append(key)
+        print(f"{key}  ({product.title}, {product.book}, {product.kind})  "
+              f"[{mark}]{changed}")
         print(
             f"  same player twice: "
             f"{'allowed' if product.allows_same_player else 'not allowed'}"
@@ -1370,6 +1394,15 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
             )
     else:
         print("Every product is marked verified.")
+
+    if untouched:
+        print(
+            "\nStill carrying the shipped numbers, unedited: "
+            + ", ".join(untouched)
+            + "\nThat is fine if your account really pays those, but it is "
+            "also what an\nunchecked ladder looks like -- the two are "
+            "indistinguishable from here."
+        )
     return 0
 
 

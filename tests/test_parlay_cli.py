@@ -1167,3 +1167,38 @@ class TestPayoutsInit:
         run(["--config", str(cfg_path), "parlay", "verify-payouts"])
         out = capsys.readouterr().out
         assert "Every product is marked verified." in out
+
+    def test_an_edited_ladder_is_marked_edited(self, wired, tmp_path, monkeypatch, capsys):
+        # Without this the verification loop has no feedback: you change a
+        # number, re-run, and the output looks exactly as it did before.
+        cfg_path, _client, tmp_path = wired
+        target = self.user_path(tmp_path, monkeypatch)
+        run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
+        target.write_text(
+            target.read_text().replace("3: [0, 0, 0, 5.0]", "3: [0, 0, 0, 6.0]")
+        )
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        out = capsys.readouterr().out
+        assert "prizepicks_power" in out
+        edited = [l for l in out.splitlines() if l.startswith("prizepicks_power")]
+        assert "[edited]" in edited[0]
+
+    def test_an_untouched_ladder_says_it_is_still_the_default(
+        self, wired, tmp_path, monkeypatch, capsys
+    ):
+        cfg_path, _client, tmp_path = wired
+        self.user_path(tmp_path, monkeypatch)
+        run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "still the shipped numbers" in out
+        assert "indistinguishable from here" in out
+
+    def test_the_shipped_table_is_not_diffed_against_itself(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        out = capsys.readouterr().out
+        assert "still the shipped numbers" not in out
+        assert "[edited]" not in out
