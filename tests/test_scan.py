@@ -216,7 +216,7 @@ class TestLiquidityBar:
 
     def test_ranking_prefers_a_deep_market_over_a_bigger_thin_edge(self, cfg, now):
         """
-        A +4.7% strikeout prop (liquidity 0.58) against a +3.0% NFL side
+        A +3.6% strikeout prop (liquidity 0.75) against a +3.0% NFL side
         (liquidity 0.99). Both clear their bars, so both are real
         candidates; the question is only which one the list opens with.
         Discounted, the prop is worth 0.027 and the side 0.030, so the side
@@ -227,7 +227,7 @@ class TestLiquidityBar:
             bulk_odds={"americanfootball_nfl": [nfl_game(dk_home_price=2.06)]},
             events_by_sport={"baseball_mlb": [
                 {"id": "mlb1", "commence_time": (NOW + timedelta(hours=6)).isoformat()}]},
-            event_odds={("baseball_mlb", "mlb1"): mlb_prop(dk_over=2.05)},
+            event_odds={("baseball_mlb", "mlb1"): mlb_prop(dk_over=2.03)},
         )
         cfg.core_sports = ["americanfootball_nfl"]
         cfg.sports = ["baseball_mlb"]

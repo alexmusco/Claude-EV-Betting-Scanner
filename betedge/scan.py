@@ -356,6 +356,25 @@ def group_sharp_markets(
     return {k: v for k, v in groups.items() if len(v) >= 2}
 
 
+def describe_quote(q: Quote) -> str:
+    """
+    Full human-readable bet, line included.
+
+    describe_side names only the side, which for a prop reads "Randal
+    Grichuk Over" -- true, useless, and impossible to place. The line is
+    the part you need.
+    """
+    side = (q.side or "").strip().lower()
+    if side in OVER_NAMES or side in UNDER_NAMES:
+        base = (q.selection if q.selection
+                and q.selection.strip().lower() != side else "Total")
+        out = f"{base} {q.side}"
+        return out if q.line is None else f"{out} {q.line:g}"
+    if q.line is None:
+        return f"{q.selection} ML"
+    return f"{q.selection} {q.line:+g}"
+
+
 def describe_side(q: Quote) -> str:
     """Human-readable side label for the report and the bet log."""
     side = (q.side or "").strip().lower()
@@ -479,8 +498,7 @@ def evaluate_event(
                     matchup=f"{meta.get('away_team')} @ {meta.get('home_team')}",
                     market=q.market,
                     tier=liq.tier,
-                    description=describe_side(q) if q.selection == q.side
-                    else f"{q.selection} {describe_side(q)}",
+                    description=describe_quote(q),
                     book=q.book,
                     soft_price=q.price,
                     sharp_price=sharp_same,
