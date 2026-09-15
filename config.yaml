@@ -202,5 +202,94 @@ prop_windows:
   baseball_mlb: 8
   americanfootball_nfl: 48
 
+# ---------------------------------------------------------------------------
+# MULTI-LEG TICKETS: pick'em entries and parlays.
+#
+# A different objective from everything above. The single-bet scanner looks
+# for a soft PRICE that beats Pinnacle's fair one. This looks for a set of
+# legs whose JOINT probability beats what the payout structure assumes --
+# which on a fixed-multiplier pick'em site is pure independence, since a
+# 5-pick pays 20x whatever five legs you chose.
+#
+#   betedge parlay verify-payouts    READ THIS FIRST. The multipliers vary
+#                                    by state and change without notice.
+#   betedge parlay coverage          which sports have usable prop coverage
+#   betedge parlay correlations      fit correlations from your game logs
+#   betedge parlay scan              build and rank tickets
+#
+# Every number this produces is only as good as two inputs the tool cannot
+# verify for you: the payout table, and the correlation estimates. Both are
+# reported on every ticket so you can see which is doing the work.
+# ---------------------------------------------------------------------------
+parlay:
+  # Payout structures to build for. Names come from betedge/data/payouts.yaml.
+  products:
+    - underdog_standard
+
+  # Books whose legs are fixed-multiplier pick'em selections. The Odds API
+  # carries Underdog; nothing here is scraped.
+  pickem_books:
+    - underdog
+
+  # Monte Carlo. The seed is fixed so a re-run does not reshuffle the
+  # ranking. 200k draws puts the standard error on a 20x ticket's EV at
+  # under a point -- small enough to rank on, and reported either way.
+  draws: 200000
+  search_draws: 8000
+  seed: 20260915
+
+  # Search shape. Beam search, not enumeration: there are 658,008 five-leg
+  # subsets of 40 candidates and each needs its own simulation.
+  min_legs: 2
+  max_legs: 5
+  beam_width: 24
+  max_candidates_per_group: 32
+  top_n: 12
+
+  # Correlation lives inside a game. A quarterback in one game and a centre
+  # in another have no structural relationship and only add variance.
+  grouping: same_game
+
+  # Bars and guards. Stricter than the single-bet path throughout: a ticket
+  # compounds the estimation error in every leg.
+  min_ev: 0.02
+  max_plausible_ev: 0.25       # above this something is wrong, not profitable
+  max_se_ratio: 0.25           # flag when the Monte Carlo noise rivals the edge
+  min_leg_edge: -0.03          # how far below break-even one leg may sit
+  min_leg_prob: 0.25
+  max_leg_prob: 0.90
+  min_leg_ev: -0.06            # for books that post a price
+  negative_pair_threshold: -0.10
+
+  # Staking. An eighth of Kelly, against a quarter for single bets: the
+  # payoff is lumpy, the probability error compounds across legs, and
+  # correlated tickets lose their legs together.
+  kelly_multiplier: 0.125
+  max_ticket_fraction: 0.01
+  # Five tickets on one game are one bet, not five.
+  max_game_exposure_fraction: 0.05
+
+  # Joint observations a fitted correlation needs before it displaces the
+  # structural prior. Below this the prior is used and the pair is reported
+  # as prior-based -- a hypothesis, not a measurement.
+  min_correlation_sample: 100
+
+  # Comparing a pick'em line against Pinnacle at a different number is not
+  # a measurement. Leave this off; when on, every leg it touches is marked
+  # estimated and the ticket is treated as suspect.
+  allow_line_interpolation: false
+  max_interpolation_distance: 1.0
+
+  # Push probability assumed on an integer line when Pinnacle does not
+  # price both surrounding half-lines. Flagged wherever it is used.
+  assumed_push_prob: 0.05
+
+  # player,team CSV or YAML. Without one, two players in the same game
+  # cannot be told apart as team mates or opponents, so the sharp priors
+  # (a QB with his own receiver, two backs splitting carries) cannot be
+  # applied and weaker blended numbers are used instead. Nothing ships,
+  # because a roster goes stale within a week.
+  # rosters_path: data/rosters.csv
+
 database: data/betedge.db
 reports_dir: reports

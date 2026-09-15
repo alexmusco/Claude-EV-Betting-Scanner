@@ -122,6 +122,150 @@ CREATE TABLE IF NOT EXISTS credit_spend (
 
 CREATE INDEX IF NOT EXISTS idx_spend_at ON credit_spend(at);
 
+-- ---------------------------------------------------------------------
+-- MULTI-LEG TICKETS
+--
+-- Mirrors opportunities/bets deliberately. `parlay_tickets` holds every
+-- ticket the optimizer GENERATED, bet or not, for the same reason
+-- `opportunities` holds every flagged single: results on the tickets you
+-- actually entered are a tiny self-selected sample, and the question
+-- worth answering is whether the modelled EV predicts anything at all.
+-- That needs the ones you passed on as much as the ones you took.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parlay_tickets (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id                 INTEGER REFERENCES scans(id),
+    created_at              TEXT NOT NULL,
+    product                 TEXT NOT NULL,
+    book                    TEXT,
+    kind                    TEXT,
+    n_legs                  INTEGER NOT NULL,
+    sports                  TEXT,
+    event_ids               TEXT,
+    commence_time           TEXT,
+    same_game               INTEGER NOT NULL DEFAULT 1,
+    joint_prob              REAL NOT NULL,
+    joint_prob_se           REAL,
+    joint_prob_independent  REAL,
+    hit_distribution        TEXT,
+    ev                      REAL NOT NULL,
+    ev_se                   REAL,
+    ev_independent          REAL,
+    payout_all_hit          REAL,
+    variance                REAL,
+    ev_per_variance         REAL,
+    kelly_fraction          REAL,
+    log_optimal_fraction    REAL,
+    recommended_stake       REAL,
+    correlation_summary     TEXT,
+    correlation_all_prior   INTEGER NOT NULL DEFAULT 0,
+    draws                   INTEGER,
+    suspect                 INTEGER NOT NULL DEFAULT 0,
+    flags                   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pt_scan ON parlay_tickets(scan_id);
+CREATE INDEX IF NOT EXISTS idx_pt_time ON parlay_tickets(commence_time);
+
+CREATE TABLE IF NOT EXISTS parlay_legs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id           INTEGER NOT NULL REFERENCES parlay_tickets(id),
+    leg_index           INTEGER NOT NULL,
+    sport               TEXT,
+    event_id            TEXT,
+    commence_time       TEXT,
+    matchup             TEXT,
+    market              TEXT NOT NULL,
+    selection           TEXT NOT NULL,
+    side                TEXT NOT NULL,
+    line                REAL,
+    team                TEXT,
+    book                TEXT,
+    book_price          REAL,
+    fair_prob           REAL NOT NULL,
+    push_prob           REAL NOT NULL DEFAULT 0,
+    hit_prob            REAL NOT NULL,
+    sharp_price_taken   REAL,
+    sharp_price_other   REAL,
+    sharp_overround     REAL,
+    devig_spread        REAL,
+    sharp_line          REAL,
+    line_source         TEXT,
+    push_source         TEXT,
+    market_tier         TEXT,
+    liquidity           REAL,
+    flags               TEXT,
+    -- Closing-line capture writes these back. A ticket's CLV is only
+    -- meaningful once every leg has one, which is why they live on the leg.
+    fair_prob_close     REAL,
+    push_prob_close     REAL,
+    closed_at           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pl_ticket ON parlay_legs(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_pl_event  ON parlay_legs(event_id);
+
+CREATE TABLE IF NOT EXISTS parlay_bets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id       INTEGER REFERENCES parlay_tickets(id),
+    placed_at       TEXT NOT NULL,
+    book            TEXT NOT NULL,
+    product         TEXT NOT NULL,
+    n_legs          INTEGER NOT NULL,
+    stake           REAL NOT NULL,
+    ev_at_bet       REAL,
+    joint_prob_at_bet REAL,
+    payout_all_hit  REAL,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    legs_hit        INTEGER,
+    legs_void       INTEGER,
+    settled_at      TEXT,
+    pnl             REAL,
+    notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pb_status ON parlay_bets(status);
+
+-- Ticket-level closing line: every leg re-priced at the close and the
+-- joint probability recomputed through the same copula. Ticket CLV is the
+-- only fast read on whether any of this works -- profit and loss on
+-- multi-leg tickets is so noisy that a hundred of them tell you nothing.
+CREATE TABLE IF NOT EXISTS parlay_closing_lines (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id               INTEGER REFERENCES parlay_tickets(id),
+    parlay_bet_id           INTEGER REFERENCES parlay_bets(id),
+    captured_at             TEXT NOT NULL,
+    legs_captured           INTEGER NOT NULL,
+    n_legs                  INTEGER NOT NULL,
+    joint_prob_close        REAL,
+    joint_prob_at_bet       REAL,
+    ev_close                REAL,
+    ev_at_bet               REAL,
+    clv_ev                  REAL,   -- EV of the entry against the closing joint prob
+    clv_prob_points         REAL    -- closing joint prob minus the modelled one
+);
+
+CREATE INDEX IF NOT EXISTS idx_pcl_ticket ON parlay_closing_lines(ticket_id);
+
+-- Pairwise correlations fitted from game logs the user supplied. The
+-- sample size is stored because it is what decides whether the number is
+-- used at all -- an estimate from 12 joint observations is not an
+-- estimate, and the report must be able to say which is which.
+CREATE TABLE IF NOT EXISTS correlation_estimates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sport           TEXT NOT NULL,
+    market_a        TEXT NOT NULL,
+    market_b        TEXT NOT NULL,
+    relation        TEXT NOT NULL,
+    rho             REAL NOT NULL,
+    spearman        REAL,
+    n_observations  INTEGER NOT NULL,
+    n_games         INTEGER,
+    fitted_at       TEXT NOT NULL,
+    note            TEXT,
+    UNIQUE(sport, market_a, market_b, relation)
+);
+
 CREATE TABLE IF NOT EXISTS closing_lines (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     opportunity_id      INTEGER REFERENCES opportunities(id),
@@ -406,6 +550,322 @@ class Database:
                 ),
             )
             return cur.lastrowid
+
+    # ------------------------------------------------- multi-leg tickets
+
+    def record_parlay_tickets(
+        self, tickets, scan_id: int | None = None, draws: int | None = None
+    ) -> list[int]:
+        """
+        Store every generated ticket and its legs.
+
+        Tickets that will never be bet are stored too. That is the whole
+        point: the modelled EV of the ones you passed on is testable
+        against their closing lines exactly as the ones you took are, and
+        without them the only sample is the one you selected.
+        """
+        ids: list[int] = []
+        with self.tx() as c:
+            for ticket in tickets:
+                row = ticket.to_row()
+                row["draws"] = draws
+                cur = c.execute(
+                    """INSERT INTO parlay_tickets (
+                           scan_id, created_at, product, book, kind, n_legs,
+                           sports, event_ids, commence_time, same_game,
+                           joint_prob, joint_prob_se, joint_prob_independent,
+                           hit_distribution, ev, ev_se, ev_independent,
+                           payout_all_hit, variance, ev_per_variance,
+                           kelly_fraction, log_optimal_fraction,
+                           recommended_stake, correlation_summary,
+                           correlation_all_prior, draws, suspect, flags)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        scan_id, row["created_at"], row["product"], row["book"],
+                        row["kind"], row["n_legs"], row["sports"], row["event_ids"],
+                        row["commence_time"], row["same_game"], row["joint_prob"],
+                        row["joint_prob_se"], row["joint_prob_independent"],
+                        row["hit_distribution"], row["ev"], row["ev_se"],
+                        row["ev_independent"], row["payout_all_hit"], row["variance"],
+                        row["ev_per_variance"], row["kelly_fraction"],
+                        row["log_optimal_fraction"], row["recommended_stake"],
+                        row["correlation_summary"], row["correlation_all_prior"],
+                        row["draws"], row["suspect"], row["flags"],
+                    ),
+                )
+                ticket_id = cur.lastrowid
+                ticket.db_id = ticket_id
+                ids.append(ticket_id)
+                for index, leg in enumerate(ticket.legs):
+                    c.execute(
+                        """INSERT INTO parlay_legs (
+                               ticket_id, leg_index, sport, event_id, commence_time,
+                               matchup, market, selection, side, line, team, book,
+                               book_price, fair_prob, push_prob, hit_prob,
+                               sharp_price_taken, sharp_price_other, sharp_overround,
+                               devig_spread, sharp_line, line_source, push_source,
+                               market_tier, liquidity, flags)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            ticket_id, index, leg.sport, leg.event_id,
+                            leg.commence_time.isoformat(), leg.matchup, leg.market,
+                            leg.selection, leg.side, leg.line, leg.team, leg.book,
+                            leg.book_price, leg.fair_prob, leg.push_prob, leg.hit_prob,
+                            leg.sharp_price_taken, leg.sharp_price_other,
+                            leg.sharp_overround, leg.devig_spread, leg.sharp_line,
+                            leg.line_source, leg.push_source, leg.market_tier,
+                            leg.liquidity, ",".join(leg.flags),
+                        ),
+                    )
+        return ids
+
+    def place_parlay_bet(
+        self,
+        ticket_id: int,
+        *,
+        stake: float,
+        book: str | None = None,
+        notes: str | None = None,
+        placed_at: datetime | None = None,
+    ) -> int:
+        """Log an entry you actually placed against a generated ticket."""
+        ticket = self.get_parlay_ticket(ticket_id)
+        if ticket is None:
+            raise ValueError(f"no parlay ticket with id {ticket_id}")
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO parlay_bets (ticket_id, placed_at, book, product,
+                       n_legs, stake, ev_at_bet, joint_prob_at_bet,
+                       payout_all_hit, status, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?)""",
+                (
+                    ticket_id,
+                    (placed_at or datetime.now(timezone.utc)).isoformat(),
+                    book or ticket["book"], ticket["product"], ticket["n_legs"],
+                    stake, ticket["ev"], ticket["joint_prob"],
+                    ticket["payout_all_hit"], notes,
+                ),
+            )
+            return cur.lastrowid
+
+    def settle_parlay_bet(
+        self,
+        bet_id: int,
+        legs_hit: int,
+        legs_void: int = 0,
+        settled_at: datetime | None = None,
+        payouts_path: str | None = None,
+    ) -> float:
+        """
+        Settle an entry from how many legs actually landed.
+
+        A multi-leg entry has no won/lost: it has a number of legs that
+        hit, which the payout structure turns into a return. So settlement
+        takes the count and re-reads the structure, rather than asking the
+        user to work out what they were paid.
+        """
+        from .parlay import PayoutTable
+
+        bet = self.get_parlay_bet(bet_id)
+        if bet is None:
+            raise ValueError(f"no parlay bet with id {bet_id}")
+        n_legs = bet["n_legs"]
+        if not 0 <= legs_hit <= n_legs:
+            raise ValueError(f"legs_hit must be between 0 and {n_legs}")
+        if not 0 <= legs_void <= n_legs or legs_hit + legs_void > n_legs:
+            raise ValueError("legs_hit and legs_void cannot exceed the leg count")
+
+        # The user's own table, if they configured one: settling against
+        # the shipped ladder when they edited theirs would book the wrong
+        # profit on every entry.
+        table = PayoutTable.load(payouts_path)
+        product = table.products.get(bet["product"])
+        if product is not None:
+            multiple = float(product.multiple_grid(n_legs)[legs_void, legs_hit])
+        elif legs_hit + legs_void == n_legs:
+            # A priced parlay is not in the table; all legs home pays the
+            # price that was recorded when the entry was logged.
+            multiple = float(bet["payout_all_hit"] or 0.0)
+        else:
+            multiple = 0.0
+
+        pnl = bet["stake"] * (multiple - 1.0)
+        status = "won" if multiple > 1.0 else ("push" if multiple == 1.0 else "lost")
+        with self.tx() as c:
+            c.execute(
+                """UPDATE parlay_bets SET status=?, legs_hit=?, legs_void=?,
+                       settled_at=?, pnl=? WHERE id=?""",
+                (
+                    status, legs_hit, legs_void,
+                    (settled_at or datetime.now(timezone.utc)).isoformat(),
+                    pnl, bet_id,
+                ),
+            )
+        return pnl
+
+    def record_parlay_leg_close(
+        self,
+        leg_id: int,
+        fair_prob_close: float,
+        push_prob_close: float = 0.0,
+        captured_at: datetime | None = None,
+    ) -> None:
+        with self.tx() as c:
+            c.execute(
+                """UPDATE parlay_legs SET fair_prob_close=?, push_prob_close=?,
+                       closed_at=? WHERE id=?""",
+                (
+                    fair_prob_close, push_prob_close,
+                    (captured_at or datetime.now(timezone.utc)).isoformat(),
+                    leg_id,
+                ),
+            )
+
+    def record_parlay_closing_line(
+        self,
+        *,
+        ticket_id: int,
+        parlay_bet_id: int | None,
+        legs_captured: int,
+        n_legs: int,
+        joint_prob_close: float | None,
+        joint_prob_at_bet: float | None,
+        ev_close: float | None,
+        ev_at_bet: float | None,
+        captured_at: datetime | None = None,
+    ) -> int:
+        clv_ev = ev_close
+        clv_prob_points = (
+            joint_prob_close - joint_prob_at_bet
+            if joint_prob_close is not None and joint_prob_at_bet is not None
+            else None
+        )
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO parlay_closing_lines (ticket_id, parlay_bet_id,
+                       captured_at, legs_captured, n_legs, joint_prob_close,
+                       joint_prob_at_bet, ev_close, ev_at_bet, clv_ev,
+                       clv_prob_points)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    ticket_id, parlay_bet_id,
+                    (captured_at or datetime.now(timezone.utc)).isoformat(),
+                    legs_captured, n_legs, joint_prob_close, joint_prob_at_bet,
+                    ev_close, ev_at_bet, clv_ev, clv_prob_points,
+                ),
+            )
+            return cur.lastrowid
+
+    def save_correlation_estimates(self, estimates) -> int:
+        """
+        Upsert fitted correlations. A refit replaces the previous number
+        for that (sport, market pair, relation) rather than accumulating
+        rows, so a lookup never has to choose between two answers.
+        """
+        written = 0
+        with self.tx() as c:
+            for e in estimates:
+                c.execute(
+                    """INSERT INTO correlation_estimates (sport, market_a, market_b,
+                           relation, rho, spearman, n_observations, n_games,
+                           fitted_at, note)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(sport, market_a, market_b, relation) DO UPDATE SET
+                           rho=excluded.rho, spearman=excluded.spearman,
+                           n_observations=excluded.n_observations,
+                           n_games=excluded.n_games, fitted_at=excluded.fitted_at,
+                           note=excluded.note""",
+                    (
+                        e.sport, e.market_a, e.market_b, e.relation, e.rho,
+                        e.spearman, e.n_observations, e.n_games,
+                        (e.fitted_at or datetime.now(timezone.utc)).isoformat(),
+                        e.note,
+                    ),
+                )
+                written += 1
+        return written
+
+    def correlation_estimates(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM correlation_estimates ORDER BY sport, market_a, market_b"
+        ).fetchall()
+
+    def get_parlay_ticket(self, ticket_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM parlay_tickets WHERE id=?", (ticket_id,)
+        ).fetchone()
+
+    def get_parlay_bet(self, bet_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM parlay_bets WHERE id=?", (bet_id,)
+        ).fetchone()
+
+    def parlay_legs(self, ticket_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM parlay_legs WHERE ticket_id=? ORDER BY leg_index",
+            (ticket_id,),
+        ).fetchall()
+
+    def latest_parlay_tickets(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM parlay_tickets ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+    def open_parlay_bets(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM parlay_bets WHERE status='pending' ORDER BY placed_at"
+        ).fetchall()
+
+    def parlay_tickets_for_closing(self) -> list[sqlite3.Row]:
+        """
+        Every ticket with at least one leg not yet priced at the close.
+
+        Which of those legs are actually due is decided per leg by the
+        caller, since a ticket can span games hours apart and the first
+        leg's market is pulled long before the last one's.
+
+        Tickets that were never bet are included on purpose -- their
+        closing lines are what turns "did the bets win" into "does the
+        model predict anything", and they cost the same call as the bet
+        ones on the same event.
+        """
+        return self.conn.execute(
+            """SELECT t.* FROM parlay_tickets t
+               WHERE EXISTS (SELECT 1 FROM parlay_legs l
+                             WHERE l.ticket_id = t.id AND l.closed_at IS NULL)"""
+        ).fetchall()
+
+    def parlay_summary(self) -> dict[str, Any]:
+        """Headline numbers for multi-leg entries, kept separate from
+        single bets because the two have completely different variance."""
+        settled = self.conn.execute(
+            "SELECT * FROM parlay_bets WHERE status NOT IN ('pending')"
+        ).fetchall()
+        staked = sum(r["stake"] for r in settled)
+        pnl = sum(r["pnl"] or 0.0 for r in settled)
+        pending = self.conn.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(stake),0) s FROM parlay_bets "
+            "WHERE status='pending'"
+        ).fetchone()
+        clv = [
+            r["clv_ev"] for r in self.conn.execute(
+                "SELECT clv_ev FROM parlay_closing_lines WHERE clv_ev IS NOT NULL"
+            ).fetchall()
+        ]
+        generated = self.conn.execute(
+            "SELECT COUNT(*) n FROM parlay_tickets"
+        ).fetchone()["n"]
+        return {
+            "tickets_generated": generated,
+            "entries_settled": len(settled),
+            "entries_pending": pending["n"],
+            "stake_pending": pending["s"],
+            "total_staked": staked,
+            "total_pnl": pnl,
+            "roi": (pnl / staked) if staked else None,
+            "avg_ticket_clv": (sum(clv) / len(clv)) if clv else None,
+            "clv_sample": len(clv),
+        }
 
     def record_spend(
         self,

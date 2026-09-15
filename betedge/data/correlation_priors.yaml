@@ -1,0 +1,357 @@
+# ===========================================================================
+# STRUCTURAL CORRELATION PRIORS
+#
+# These are PRIORS, not measurements. Every number below is a considered
+# guess at a relationship that is true by construction -- a quarterback's
+# passing yards ARE the sum of his receivers' receiving yards, two running
+# backs on one team ARE dividing a fixed number of carries -- but the
+# MAGNITUDES are judgement, not data.
+#
+# The tool reports, per leg pair, whether the correlation it used came
+# from here or from fitted game logs, and it says so on every ticket. An
+# expected value built entirely on this file is a hypothesis. One built on
+# five hundred games of joint observations is an estimate. Do not let the
+# report's precision make the first look like the second.
+#
+# To replace a prior with a measurement:
+#
+#   betedge parlay correlations --from game_logs.csv
+#
+# which fits pairwise correlations from box scores you supply and writes
+# them to the database with the sample size attached. A fitted value is
+# used in place of the prior once it has enough joint observations
+# (parlay.min_correlation_sample, default 100).
+#
+# ---------------------------------------------------------------------------
+# HOW AN ENTRY IS READ
+#
+#   markets:  the two market keys, in either order. "*" matches any market.
+#   relation: how the two legs are related --
+#               same_player    one player, two stats
+#               same_team      two players on the same side
+#               opposing_team  players on opposite sides
+#               same_game      same event, sides unknown or not applicable
+#               cross_game     different events
+#   rho:      the latent correlation when BOTH legs are taken Over (or Yes).
+#             Taking one of them Under flips the sign; the code does that,
+#             so write every number here for the both-Over orientation.
+#
+# The most specific match wins: an exact market pair beats a wildcard,
+# and a wildcard beats the per-relation default.
+# ===========================================================================
+
+meta:
+  version: 1
+
+# Used when nothing more specific matches. Deliberately small: an unknown
+# relationship should not be allowed to manufacture an edge.
+defaults:
+  same_player: 0.20
+  same_team: 0.05
+  opposing_team: 0.00
+  same_game: 0.05
+  cross_game: 0.00
+
+priors:
+
+  # =======================================================================
+  # NFL. The cleanest structural correlations in any sport, because the
+  # box score is close to an accounting identity: passing yards are the
+  # sum of receiving yards, and carries and targets are a fixed pool.
+  # =======================================================================
+  americanfootball_nfl:
+    - markets: [player_pass_yds, player_reception_yds]
+      relation: same_team
+      rho: 0.45
+      why: >
+        A quarterback's passing yards are, by definition, the sum of his
+        receivers' receiving yards. The correlation with any ONE receiver
+        is well short of 1 because the yards are shared out, but this is
+        the strongest same-team pair in football and the canonical
+        pick'em stack.
+    - markets: [player_pass_yds, player_receptions]
+      relation: same_team
+      rho: 0.35
+      why: >
+        Same mechanism, one step removed: receptions drive yards but a
+        receiver can catch eight balls for forty yards.
+    - markets: [player_pass_tds, player_reception_yds]
+      relation: same_team
+      rho: 0.30
+      why: >
+        Touchdown passes need receivers in the end zone, and scoring
+        drives are long drives.
+    - markets: [player_pass_yds, player_pass_tds]
+      relation: same_player
+      rho: 0.40
+      why: >
+        Volume and scoring move together, loosely: 400 yards with no
+        touchdowns and 180 yards with three both happen most weeks.
+    - markets: [player_reception_yds, player_receptions]
+      relation: same_player
+      rho: 0.75
+      why: >
+        Two views of the same afternoon. Nearly the same bet, which also
+        makes this the pair most likely to trip the same-player guard.
+    - markets: [player_rush_yds, player_rush_yds]
+      relation: same_team
+      rho: -0.30
+      why: >
+        Two backs in one backfield split a fixed number of carries. This
+        is the clearest NEGATIVE structural pair in the sport and the one
+        that most often turns a plausible-looking stack into a bad ticket.
+    - markets: [player_reception_yds, player_reception_yds]
+      relation: same_team
+      rho: -0.10
+      why: >
+        Receivers compete for targets, which pushes negative, but they
+        share in a team passing day, which pushes positive. The two
+        roughly cancel with a slight edge to competition.
+    - markets: [player_pass_yds, player_rush_yds]
+      relation: same_team
+      rho: -0.20
+      why: >
+        Game script. A team with the lead runs the ball and stops
+        throwing; a team chasing does the reverse.
+    - markets: [player_pass_yds, player_pass_yds]
+      relation: opposing_team
+      rho: 0.25
+      why: >
+        Shootouts are mutual. Both quarterbacks throw more when the other
+        one is scoring, and both throw less in a mud fight.
+    - markets: [player_rush_yds, player_rush_yds]
+      relation: opposing_team
+      rho: -0.15
+      why: >
+        Only one team can be ahead and running out the clock.
+    - markets: [player_anytime_td, player_pass_tds]
+      relation: same_team
+      rho: 0.35
+      why: >
+        A receiver's touchdown usually IS one of his quarterback's
+        touchdown passes.
+    - markets: [player_anytime_td, totals]
+      relation: same_game
+      rho: 0.30
+      why: >
+        Touchdowns are most of the points. A high-scoring game is a game
+        in which more players score.
+    - markets: [player_pass_yds, totals]
+      relation: same_game
+      rho: 0.30
+      why: Scoring and passing volume rise together.
+    - markets: ["*", totals]
+      relation: same_game
+      rho: 0.18
+      why: >
+        Any offensive counting stat rises with the game total. Weaker than
+        the named pairs above, but never zero.
+
+    # --- team unknown -----------------------------------------------------
+    # The Odds API does not say which team a player plays for, so without a
+    # roster (parlay.rosters_path) two players in one game cannot be told
+    # apart as team mates or opponents. These entries are the BLEND of the
+    # same-team and opposing-team numbers above, and they are deliberately
+    # only written for pairs whose sign is the same either way -- where the
+    # two point in opposite directions the honest blend is near zero and
+    # the per-relation default is left to handle it.
+    #
+    # Supply a roster to get the sharper numbers instead of these.
+    - markets: [player_pass_yds, player_reception_yds]
+      relation: same_game
+      rho: 0.25
+      why: >
+        Positive whichever side the receiver is on: his own quarterback's
+        yards by construction, the other one's through a shootout.
+    - markets: [player_pass_yds, player_receptions]
+      relation: same_game
+      rho: 0.20
+      why: Same blend, one step removed from the yards.
+    - markets: [player_pass_yds, player_pass_yds]
+      relation: same_game
+      rho: 0.25
+      why: >
+        Two quarterbacks in one game are always opponents -- a team has
+        one passer -- so this needs no roster and takes the shootout value
+        directly.
+    - markets: [player_rush_yds, player_rush_yds]
+      relation: same_game
+      rho: -0.20
+      why: >
+        Negative either way: team mates split carries, opponents split the
+        lead that lets a team run at all.
+    - markets: [player_anytime_td, player_pass_tds]
+      relation: same_game
+      rho: 0.20
+      why: Blend of the same-team identity and a shootout lifting both.
+
+  # =======================================================================
+  # NBA. Pace lifts everything in the game at once, and usage divides a
+  # fixed number of possessions between teammates. Those two forces point
+  # in opposite directions, which is why same-team pairs here are much
+  # nearer zero than football's.
+  # =======================================================================
+  basketball_nba:
+    - markets: [player_points, player_points]
+      relation: same_team
+      rho: -0.10
+      why: >
+        Usage competition (one ball) against shared pace (a fast game
+        gives everyone more chances). Competition wins narrowly.
+    - markets: [player_points, player_points]
+      relation: opposing_team
+      rho: 0.10
+      why: Pace is shared by both teams; a track meet lifts all scorers.
+    - markets: [player_assists, player_points]
+      relation: same_team
+      rho: 0.25
+      why: >
+        An assist requires a teammate to score. The playmaker's assists
+        and his scorers' points are two ends of the same pass.
+    - markets: [player_points, player_points_rebounds_assists]
+      relation: same_player
+      rho: 0.80
+      why: Points are the largest component of PRA. Near-duplicate legs.
+    - markets: [player_threes, player_points]
+      relation: same_player
+      rho: 0.55
+      why: Each three carries three of the points.
+    - markets: [player_points, player_rebounds]
+      relation: same_player
+      rho: 0.15
+      why: >
+        Mostly a minutes effect -- a player who stays on the floor
+        accumulates both.
+    - markets: [player_rebounds, player_rebounds]
+      relation: same_team
+      rho: -0.25
+      why: >
+        A rebound is claimed once. Teammates boxing out the same rim are
+        in direct competition for a fixed supply of misses.
+    - markets: [player_rebounds, player_rebounds]
+      relation: opposing_team
+      rho: -0.15
+      why: Same fixed supply, contested across the matchup.
+    - markets: ["*", totals]
+      relation: same_game
+      rho: 0.20
+      why: Pace and scoring lift every counting stat in the box score.
+
+    # --- team unknown: see the note in the NFL block above ----------------
+    - markets: [player_rebounds, player_rebounds]
+      relation: same_game
+      rho: -0.20
+      why: >
+        Negative either way. Every rebound is claimed exactly once, by
+        somebody, and there are only so many misses.
+    - markets: [player_assists, player_points]
+      relation: same_game
+      rho: 0.15
+      why: >
+        Positive either way: an assist creates a basket for a team mate,
+        and a game with lots of both is simply a fast game.
+
+  # =======================================================================
+  # MLB. Weakest same-team correlations of the four: a baseball lineup is
+  # close to a sequence of independent plate appearances. The strong pairs
+  # are pitcher-versus-batter, where the relationship is adversarial and
+  # direct.
+  # =======================================================================
+  baseball_mlb:
+    - markets: [pitcher_strikeouts, batter_hits]
+      relation: opposing_team
+      rho: -0.25
+      why: >
+        A batter the pitcher strikes out is a batter not getting a hit.
+        The opposition is mechanical, which is what makes it reliable.
+    - markets: [pitcher_strikeouts, batter_total_bases]
+      relation: opposing_team
+      rho: -0.25
+      why: Same mechanism as hits, one step along.
+    - markets: [pitcher_strikeouts, pitcher_outs]
+      relation: same_player
+      rho: 0.45
+      why: >
+        A pitcher who is missing bats stays in the game. Both stats are
+        cut short by the same early hook.
+    - markets: [pitcher_earned_runs, batter_total_bases]
+      relation: opposing_team
+      rho: 0.40
+      why: >
+        The runs a pitcher gives up and the bases the other side takes are
+        the same innings counted twice.
+    - markets: [batter_total_bases, batter_hits]
+      relation: same_player
+      rho: 0.80
+      why: A hit is at least one base. Near-duplicate legs.
+    - markets: [batter_total_bases, batter_total_bases]
+      relation: same_team
+      rho: 0.15
+      why: >
+        Lineups score in bunches -- a big inning puts several batters on
+        the board at once -- but plate appearances are otherwise close to
+        independent. Small and positive.
+    - markets: [pitcher_strikeouts, totals]
+      relation: same_game
+      rho: -0.15
+      why: Strikeouts suppress scoring; they are the anti-total.
+    - markets: ["*", totals]
+      relation: same_game
+      rho: 0.15
+      why: Offensive counting stats rise with runs.
+
+    # --- team unknown: see the note in the NFL block above ----------------
+    # A pitcher faces the other side's nine batters and none of his own, so
+    # a pitcher/batter pair drawn at random from one game is opposing more
+    # often than not -- but not always, which is what the discount is for.
+    - markets: [pitcher_strikeouts, batter_hits]
+      relation: same_game
+      rho: -0.12
+      why: Diluted version of the opposing-team relationship.
+    - markets: [pitcher_strikeouts, batter_total_bases]
+      relation: same_game
+      rho: -0.12
+      why: Diluted version of the opposing-team relationship.
+
+  # =======================================================================
+  # NHL. Line mates share ice time and power plays; the goalie's saves are
+  # an accounting identity with the other side's shots.
+  # =======================================================================
+  icehockey_nhl:
+    - markets: [player_total_saves, player_shots_on_goal]
+      relation: opposing_team
+      rho: 0.45
+      why: >
+        A save is a shot on goal that did not go in. The goalie's total
+        and the opposing shooters' totals are the same shots counted from
+        both ends.
+    - markets: [player_points, player_points]
+      relation: same_team
+      rho: 0.20
+      why: >
+        Line mates and power-play units score together -- a goal and its
+        assists are one event credited to two or three players.
+    - markets: [player_shots_on_goal, player_shots_on_goal]
+      relation: same_team
+      rho: 0.10
+      why: Shared ice time and zone pressure, weakly.
+    - markets: [player_points, totals]
+      relation: same_game
+      rho: 0.30
+      why: Points ARE goals and assists, so they track the total directly.
+    - markets: ["*", totals]
+      relation: same_game
+      rho: 0.12
+      why: Weak lift from a higher-event game.
+
+    # --- team unknown: see the note in the NFL block above ----------------
+    - markets: [player_total_saves, player_shots_on_goal]
+      relation: same_game
+      rho: 0.22
+      why: >
+        Diluted version of the saves/shots identity: a goalie and a shooter
+        drawn from one game are usually, but not always, opponents.
+    - markets: [player_points, player_points]
+      relation: same_game
+      rho: 0.10
+      why: Line mates score together; a loose game lifts both sides.

@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 .env
-data/
+# The runtime directory only: the local database and the API cache. Anchored
+# to the repo root with a leading slash, because an unanchored `data/` also
+# matches betedge/data/, which holds the shipped payout ladders and
+# correlation priors -- source, not runtime state.
+/data/
 reports/
 *.xlsx
 !betedge/templates/*.xlsx

@@ -475,11 +475,220 @@ None of the guards here can protect you from betting more than you should.
 
 ---
 
+## Multi-leg tickets: pick'em and parlays
+
+A different objective from everything above, and worth being precise about
+because the difference determines the whole design.
+
+The single-bet scanner looks for a soft book whose **price** beats
+Pinnacle's de-vigged fair price on the same selection. The parlay
+optimizer looks for a set of legs whose **joint probability** beats what
+the payout structure assumes.
+
+### Where the edge actually is
+
+**Fixed-multiplier pick'em is the primary target.** Underdog and
+PrizePicks set the payout by leg count and nothing else — a 2-pick pays
+3x, a 5-pick pays 20x — and that multiple does not adjust for which legs
+you chose. Two positively correlated legs hit together more often than a
+3x multiple implies. The gap between the real joint probability and the
+independence the multiple assumes is the edge, and it is structural: it is
+there whether or not anybody made a mistake.
+
+**DraftKings same-game parlays are the secondary, harder target.** DK runs
+its own correlation model and already discounts correlated SGP legs. An
+edge there means their correlation estimate is wrong, not merely that
+correlation exists. The tool supports it, expects far fewer hits, and
+flags every result from it as lower confidence. Pass `--offered-price`
+with what the app actually shows, because the product of the legs is an
+upper bound a same-game parlay will never pay.
+
+**Cross-game parlays are a trap.** The vig compounds — four legs at 4.5%
+hold each is `1.045⁴ − 1`, about 19% — and legs in different games have no
+correlation to claw any of it back. The maths is implemented
+(`copula.compounded_hold`) so the tool can state it with a number, and the
+search refuses to build these by default.
+
+### The marginals come from Pinnacle
+
+This is the load-bearing idea. The pick'em sites post a line and a
+multiplier; they do not post two sides, so there is no vig to strip and
+nothing to de-vig there. The edge comes from having a better estimate of
+each leg's probability than the pick'em site does — and that estimate is
+Pinnacle's two-sided market on the same player, same stat, **same line**,
+run through the existing `pricing.devig`.
+
+Same line is not a detail. A leg compared against Pinnacle's number at a
+different line is not a measurement of anything, so by default such a leg
+is dropped. `--interpolate` will estimate one from Pinnacle's neighbouring
+rungs instead — in probit space, refusing to extrapolate — and marks every
+leg it touches as estimated and every ticket containing one as suspect.
+
+**A leg with no Pinnacle reference is not usable**, and a ticket
+containing one is not scored. That is a refusal, not a fallback.
+
+### Joint probability: a Gaussian copula
+
+No multiplying of marginals and no hand-waved "correlation bonus". Each
+leg gets a latent standard normal oriented so large means the leg wins,
+with its threshold set so `P(Z > t) = p`. The legs are drawn together from
+a multivariate normal with correlation matrix `R`, and the joint
+probability is the fraction of draws where every latent clears its
+threshold.
+
+A fixed seed makes the ranking reproducible; the standard error is
+reported next to every estimate rather than hidden. If the assembled `R`
+is not positive semi-definite — pairwise numbers from different sources
+need not be mutually consistent — it is projected to the nearest PSD
+matrix by eigenvalue clipping, and the ticket says so.
+
+The same draws give the full distribution of *how many* legs landed, which
+is what flex and insured entries actually pay on.
+
+### Payout structures are data, not code
+
+`betedge/data/payouts.yaml` holds a payout **vector** per leg count: what a
+1-unit entry returns when exactly *k* legs hit, for `k = 0..n`. So
+
+```
+EV = Σₖ P(exactly k hit) × payout[k] − 1
+```
+
+Modelling only the all-hit case gets a flex entry badly wrong, so the full
+vector is modelled. Pushes are modelled too: a leg landing exactly on an
+integer line usually voids and shrinks the entry to the smaller table, and
+integer lines on low-count stats are common. Where Pinnacle prices both
+surrounding half-lines the push probability is measured exactly
+(`P(X = L) = P(X > L−0.5) − P(X > L+0.5)`); where it does not, the
+configured assumption is used and the leg is flagged.
+
+> **The shipped ladders are unverified and every ticket says so.** They
+> vary by state, change without notice, and an EV built on the wrong one is
+> not slightly wrong — a 5-pick paying 10x instead of 20x turns a good bet
+> into a bad one. Run `betedge parlay verify-payouts`, check it against
+> your account, edit the file, set `verified: true`.
+
+### Correlation: priors, then measurements — and always labelled
+
+Two sources, in order of preference:
+
+1. **Structural priors** (`betedge/data/correlation_priors.yaml`) —
+   relationships true by construction. A quarterback's passing yards are
+   the sum of his receivers' receiving yards (+0.45). Two backs split one
+   pool of carries (−0.30). A goalie's saves are the other team's shots
+   (+0.45). Every entry carries its reasoning in a comment. The **sign** of
+   these is close to certain; the **magnitude** is judgement.
+2. **Empirical estimates** fitted from game logs you supply. Fitted through
+   Spearman rank correlation — immune to the long right tails of counting
+   stats — and converted to the copula's latent scale with
+   `ρ = 2 sin(π ρₛ / 6)`, which is exact for a Gaussian copula and assumes
+   nothing about the marginals. Stored with the sample size, and used in
+   place of the prior once there are enough joint observations
+   (default 100).
+
+Every pair reports which source it used, all the way through to the HTML
+report. **An EV built entirely on priors is a hypothesis; one built on 500
+games of joint data is an estimate.** They must never look alike.
+
+Nothing is inferred from the odds. Backing a correlation out of DK's SGP
+price would make this tool agree with DraftKings by construction, which
+would guarantee it could never find the thing it is looking for.
+
+Because The Odds API does not say which team a player plays for, two
+players in one game cannot be told apart as team mates or opponents
+without help. Supply a roster (`parlay.rosters_path`, or `--rosters`, a
+`player,team` CSV) to get the sharp same-team and opposing-team priors;
+without one the tool falls back to explicitly-labelled same-game blends
+and says so on every ticket. No roster ships, because one goes stale in a
+week and a stale roster puts the wrong sign on a real ticket.
+
+### The honesty check that matters most
+
+Every ticket reports its EV **with** the correlation matrix and **with** it
+replaced by the identity — the latter computed exactly rather than
+simulated, so the comparison is against a number with no noise in it. If a
+ticket is positive only in the first, the entire case for betting it is a
+correlation estimate rather than a price, and the report says so in a
+coloured box rather than in a footnote.
+
+### Guards
+
+Same philosophy as `scan.py`: reject and flag rather than trust.
+
+| Guard | What it does |
+|---|---|
+| EV above the plausibility ceiling | Suspect, no stake. A +40% pick'em ticket means a wrong line, a stale quote, or a payout table that doesn't match reality. |
+| A leg with no Pinnacle reference | The ticket is not scored at all. |
+| Positive only under assumed correlation | Flagged prominently, suspect, no stake. |
+| Correlation entirely from priors | Flagged — a hypothesis, not a measurement. |
+| Monte Carlo error large next to the edge | Flagged, suspect. |
+| Same player twice | Rejected unless the product allows it. Two legs on the same prop are always rejected. |
+| Legs on opposite sides of a correlated pair | Flagged as probable negative correlation, with the pair and the sign named. |
+| Correlation matrix not PSD | Projected, and the projection is reported. |
+| Cross-game parlay | Suspect, with its compounded hold stated. |
+| Unverified payout table | Flagged on every ticket built from it. |
+
+### Search and staking
+
+Full enumeration is hopeless — 658,008 five-leg subsets of 40 candidates,
+each needing its own simulation — so the search is a beam over leg sets,
+deduplicated by leg set rather than order, with one shared pool of random
+numbers so candidates are compared on the same draws. Finalists are
+re-simulated at full precision. Results are returned ranked by EV **and**
+separately by EV per unit of variance, because those are different
+questions and blending them answers neither.
+
+Staking reuses `pricing.kelly_fraction` on the price that reproduces the
+ticket's EV, but a parlay breaks Kelly's assumptions harder than a single
+bet: the payoff is lumpy, the probability error compounds across legs, and
+correlated tickets lose their legs together. So the fraction is an eighth
+of Kelly rather than a quarter, the per-ticket cap is tighter, and there is
+a per-game exposure cap on top of the existing board-wide one — five
+tickets on the same game are one bet, not five. The log-optimal fraction
+computed straight off the Monte Carlo draws is reported alongside as a
+cross-check.
+
+Ranking is always by expected value. **A 20x ticket at −8% is a worse bet
+than a 3x at +4%**, and nothing in the output is sorted in a way that says
+otherwise.
+
+### Which sports
+
+NBA, NFL, MLB and NHL — the leagues where Pinnacle and DraftKings both
+carry deep player props. That is a starting point, not a conclusion:
+
+```bash
+betedge parlay coverage
+```
+
+probes the API and reports, per sport, how many two-sided Pinnacle prop
+markets exist and how many a target book quotes **on the same line** — the
+number that actually decides usability. Tennis, MMA and soccer are
+excluded from the prop-based optimizer with the reason stated in
+`parlay.PROP_OPTIMIZER_EXCLUDED`: Pinnacle prices almost no player props
+in them, so there is nothing to build a marginal from. Their edge is in
+core markets, which the single-bet scanner already covers.
+
+### Ticket closing-line value
+
+`betedge close` re-prices every leg of every open ticket at Pinnacle's
+closing number and pushes the result back through the same copula, so a
+ticket gets a joint probability at the close to compare against the
+modelled one. Tickets that were never bet are captured too — they are most
+of the evidence. This is the only fast read on whether any of this works:
+profit and loss on parlays is so noisy that a hundred settled entries still
+tell you nothing.
+
+---
+
 ## Layout
 
 ```
 betedge/
   pricing.py    de-vig, EV, Kelly          ← the maths, heavily tested
+  copula.py     Gaussian copula: the joint probability of a multi-leg ticket
+  correlation.py structural priors, fitted estimates, matrix assembly
+  parlay.py     pick'em and parlay tickets: legs, guards, search, staking
   liquidity.py  how far to trust a fair price, and what edge to demand
   budget.py     monthly credit pacing
   markets.py    sport and market registry, credit cost rules
@@ -490,7 +699,10 @@ betedge/
   report.py     console tables and HTML reports
   tracker.py    Excel tracker export
   cli.py        commands
-tests/          175 tests; no network, no credits spent
+  data/
+    payouts.yaml             pick'em payout ladders — YOU must verify these
+    correlation_priors.yaml  structural correlation priors, with reasoning
+tests/          520 tests; no network, no credits spent
 ```
 
 ```bash
@@ -515,3 +727,9 @@ pytest
 | `bet close` | ~1/event | Capture closing lines |
 | `bet report` | free | Performance and CLV |
 | `bet export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |
+| `bet parlay verify-payouts` | free | Print the payout ladders. **Read this before trusting any ticket EV.** |
+| `bet parlay coverage` | ~1/event | Which sports have usable two-sided Pinnacle prop coverage |
+| `bet parlay correlations` | free | Fit pairwise correlations from your game logs, and show what is stored |
+| `bet parlay scan` | budgeted | Build and rank multi-leg tickets |
+| `bet parlay bet <id> --stake N` | free | Log an entry you placed |
+| `bet parlay settle <id> --hit K` | free | Settle it by how many legs landed |

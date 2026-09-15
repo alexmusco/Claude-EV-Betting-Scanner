@@ -12,7 +12,16 @@ import pytest
 from betedge.config import Config
 from betedge.oddsapi import Quota
 
-NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+#: Anchor for every fixture payload.
+#:
+#: Tied to the wall clock rather than frozen to a literal date. The
+#: payloads stamp their `last_update` at this instant, but the CLI
+#: commands under test take their own `now` from the real clock -- so with
+#: a frozen anchor every quote read as hours stale and six tests passed
+#: only if the suite happened to run within twenty minutes of noon on one
+#: particular day in 2026. Rounded to the minute so a single run is still
+#: internally consistent.
+NOW = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
 
 def iso(dt: datetime) -> str:

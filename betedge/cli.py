@@ -12,6 +12,13 @@ Command line interface.
     betedge close                         capture closing lines for open bets
     betedge report                        performance report
     betedge export <file.csv>             dump bets to CSV
+
+    betedge parlay scan                   build and rank multi-leg tickets
+    betedge parlay coverage               which sports have usable prop coverage
+    betedge parlay correlations --from X  fit correlations from game logs
+    betedge parlay verify-payouts         print the payout table being used
+    betedge parlay bet <ticket> --stake N log an entry you placed
+    betedge parlay settle <id> --hit K    settle it by legs landed
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from pathlib import Path
 
 from . import budget as B
 from . import report as R
-from .closing import capture_closing_lines
+from .closing import capture_closing_lines, capture_parlay_closing_lines
 from .config import Config
 from .db import Database, parse_timestamp
 from .markets import SPORTS, expand_sport_keys, markets_for
@@ -520,12 +527,30 @@ def cmd_close(cfg: Config, args) -> int:
     db = Database(cfg.database)
     client = build_client(cfg)
     stats = capture_closing_lines(cfg, client, db, window_minutes=args.window)
-    _log_spend(db, client, "close")
     print(
         f"Checked {stats['events_checked']} events, captured {stats['captured']} "
-        f"closing lines, {stats['not_found']} not found, {stats['errors']} errors. "
-        f"({client.quota.spent_this_session} credits)"
+        f"closing lines, {stats['not_found']} not found, {stats['errors']} errors."
     )
+
+    # Multi-leg tickets capture their legs off the same endpoint, and a
+    # ticket's joint probability is recomputed once every leg has closed.
+    # Ticket CLV is the only fast read on whether the parlay model works,
+    # so it runs by default and is skipped only on request.
+    if not args.no_parlays:
+        try:
+            p = capture_parlay_closing_lines(cfg, client, db,
+                                             window_minutes=args.window)
+            if p["tickets_checked"]:
+                print(
+                    f"Tickets: {p['legs_captured']} leg(s) closed across "
+                    f"{p['events_checked']} event(s); {p['tickets_closed']} "
+                    f"ticket(s) now fully priced at the close."
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Parlay closing capture failed: {exc}")
+
+    _log_spend(db, client, "close")
+    print(f"({client.quota.spent_this_session} credits)")
     db.close()
     return 0
 
@@ -546,6 +571,20 @@ def cmd_report(cfg: Config, args) -> int:
             print(f"{k:22} {v:,.2f}")
         else:
             print(f"{k:22} {v:,}")
+
+    parlay = db.parlay_summary()
+    if parlay["tickets_generated"]:
+        print("\nMulti-leg tickets")
+        print("-" * 40)
+        for k, v in parlay.items():
+            if v is None:
+                print(f"{k:22} -")
+            elif isinstance(v, float) and k in {"roi", "avg_ticket_clv"}:
+                print(f"{k:22} {v:+.2%}")
+            elif isinstance(v, float):
+                print(f"{k:22} {v:,.2f}")
+            else:
+                print(f"{k:22} {v:,}")
 
     path = R.write_report(
         Path(cfg.reports_dir) / "performance.html", R.performance_report_html(db, cfg)
@@ -585,6 +624,309 @@ def cmd_export(cfg: Config, args) -> int:
         for r in rows:
             writer.writerow(dict(r))
     print(f"Wrote {len(rows)} bets to {path}")
+    db.close()
+    return 0
+
+
+# --------------------------------------------------------------------------
+# Parlay / pick'em commands
+# --------------------------------------------------------------------------
+
+
+def cmd_parlay_scan(cfg: Config, args) -> int:
+    from . import parlay as P
+
+    if args.sports:
+        cfg.sports = args.sports
+    if args.products:
+        cfg.parlay.products = args.products
+    if args.bankroll is not None:
+        cfg.bankroll.amount = args.bankroll
+    if args.min_ev is not None:
+        cfg.parlay.min_ev = args.min_ev
+    if args.max_legs is not None:
+        cfg.parlay.max_legs = args.max_legs
+    if args.draws is not None:
+        cfg.parlay.draws = args.draws
+    if args.rosters:
+        cfg.parlay.rosters_path = args.rosters
+    if args.interpolate:
+        cfg.parlay.allow_line_interpolation = True
+    if args.grouping:
+        cfg.parlay.grouping = args.grouping
+
+    db = Database(cfg.database)
+    client = build_client(cfg)
+
+    # The prop endpoint bills per event per market, which is the one thing
+    # here that can eat a month of quota, so the day's allowance caps the
+    # run exactly as it does for `daily`.
+    if cfg.budget.enabled and not args.ignore_budget:
+        try:
+            client.probe_quota()          # free
+            status = current_budget(cfg, db, client)
+            allowance = max(0, status.spendable - client.quota.spent_this_session)
+            if allowance < 3:
+                print(
+                    "No credits left in today's allowance. Run `betedge budget` "
+                    "to see the pacing, or pass --ignore-budget to override it."
+                )
+                db.close()
+                return 0
+            client.max_credits_per_scan = client.quota.spent_this_session + allowance
+            print(f"Scanning with up to {allowance:,} credits.\n")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not check the budget ({exc}); using the per-scan cap.")
+
+    result = P.scan_parlays(
+        cfg, client, db=db,
+        max_events_per_sport=args.max_events,
+        offered_price=args.offered_price,
+    )
+
+    ticket_ids = db.record_parlay_tickets(
+        result.tickets, draws=cfg.parlay.draws
+    )
+    _log_spend(db, client, "parlay scan", ",".join(result.sports)[:200])
+
+    print(R.parlay_summary(result))
+    print()
+    print(R.parlay_console(
+        R.sorted_by_ev(result.clean), limit=args.limit,
+        title="Ranked by expected value",
+    ))
+    if result.clean:
+        print()
+        print(R.parlay_console(
+            R.sorted_by_ev_per_variance(result.clean), limit=min(args.limit, 5),
+            title="Ranked by expected value per unit of variance",
+        ))
+    if result.suspect and not args.hide_suspect:
+        print("\nSuspect (a guard tripped, no stake recommended):")
+        print(R.parlay_console(result.suspect, limit=5))
+
+    # Only warn about the products this run actually used. Naming the
+    # whole table would train the reader to skip a line that matters.
+    table = P.PayoutTable.load(cfg.parlay.payouts_path)
+    used = [k for k in result.products if k in table.unverified]
+    if used:
+        print(
+            "\nNOTE: the payout ladder has not been verified against your "
+            f"account for: {', '.join(used)}.\n"
+            "      Every EV above is only as right as those multipliers, and "
+            "they vary by state.\n"
+            "      Check them with `betedge parlay verify-payouts`."
+        )
+
+    print(f"\n{len(ticket_ids)} ticket(s) logged.")
+    if any(t.recommended_stake > 0 for t in result.clean):
+        print("Log one with:  betedge parlay bet <id> --stake <amount>")
+
+    if not args.no_report:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        path = R.write_report(
+            Path(cfg.reports_dir) / f"parlay_{stamp}.html",
+            R.parlay_report_html(result, cfg, title=f"Parlay scan {stamp}"),
+        )
+        print(f"Report: {path}")
+    db.close()
+    return 0
+
+
+def cmd_parlay_coverage(cfg: Config, args) -> int:
+    """
+    Which sports actually support this, measured rather than asserted.
+
+    The module ships a default list, but seasons turn over and a book's
+    prop coverage changes with them, so the list is re-derivable from what
+    the API is serving today.
+    """
+    from . import parlay as P
+
+    client = build_client(cfg)
+    db = Database(cfg.database)
+    sports = args.sports or list(P.DEFAULT_PROP_SPORTS)
+    report = P.probe_coverage(
+        cfg, client, sports=sports, max_events_per_sport=args.max_events
+    )
+    _log_spend(db, client, "parlay coverage", ",".join(sports)[:200])
+
+    header = (
+        f"{'sport':<26} {'events':>7} {'probed':>7} {'pinnacle 2-sided':>17} "
+        f"{'book quotes':>12} {'same line':>10} {'match':>7} {'credits':>8}"
+    )
+    print(header)
+    print("-" * len(header))
+    for row in report.rows:
+        if row.error:
+            print(f"{row.sport:<26} {row.error[:70]}")
+            continue
+        print(
+            f"{row.sport:<26} {row.events_in_window:>7} {row.events_probed:>7} "
+            f"{row.two_sided_sharp_markets:>17,} {row.with_book_quote:>12,} "
+            f"{row.matched_on_same_line:>10,} {row.match_rate:>6.0%} "
+            f"{row.credits_spent:>8,}"
+        )
+
+    print(
+        "\n'same line' is the number that matters: a pick'em line compared "
+        "against\nPinnacle at a different number is not a measurement, so those "
+        "legs are\ndropped rather than approximated."
+    )
+    usable = report.recommended
+    if usable:
+        print(f"\nUsable today: {', '.join(usable)}")
+        print("Put these in `sports:` in config.yaml for the prop pass.")
+    else:
+        print(
+            "\nNothing has usable coverage right now. Out of season, or the "
+            "slate has not been posted yet -- try again closer to game day."
+        )
+
+    print("\nDeliberately excluded from the prop-based optimizer:")
+    for pattern, why in sorted(report.excluded.items()):
+        print(f"  {pattern:<26} {why}")
+    print(f"\n{report.credits_spent} credit(s) spent on this probe.")
+    db.close()
+    return 0
+
+
+def cmd_parlay_correlations(cfg: Config, args) -> int:
+    from . import correlation as C
+
+    db = Database(cfg.database)
+    if args.source:
+        rows = C.read_game_logs(args.source)
+        markets = args.markets or None
+        estimates = C.fit_correlations(
+            rows, markets=markets, max_pairs_per_bucket=args.max_pairs
+        )
+        written = db.save_correlation_estimates(estimates)
+        print(
+            f"Read {len(rows):,} stat lines and fitted {written} pairwise "
+            f"correlation(s)."
+        )
+
+    store = C.EstimateStore.from_db(db)
+    if not len(store):
+        print(
+            "No fitted correlations stored. Until there are, every ticket's "
+            "correlation comes\nfrom the structural priors in "
+            "betedge/data/correlation_priors.yaml -- which makes\nevery EV a "
+            "hypothesis rather than an estimate. Fit some with:\n\n"
+            "  betedge parlay correlations --from game_logs.csv\n\n"
+            "CSV columns: " + ", ".join(C.REQUIRED_LOG_COLUMNS) + "[, date]"
+        )
+        db.close()
+        return 0
+
+    threshold = cfg.parlay.min_correlation_sample
+    header = (
+        f"{'sport':<22} {'market a':<26} {'market b':<26} {'relation':<14} "
+        f"{'rho':>6} {'spearman':>9} {'n':>8}  used"
+    )
+    print(header)
+    print("-" * len(header))
+    for e in store.all():
+        used = "yes" if e.n_observations >= threshold else f"no (<{threshold})"
+        print(
+            f"{e.sport:<22} {e.market_a:<26.26} {e.market_b:<26.26} "
+            f"{e.relation:<14} {e.rho:>+6.2f} {e.spearman:>+9.2f} "
+            f"{e.n_observations:>8,}  {used}"
+        )
+    print(
+        f"\nA fitted value replaces the structural prior once it has "
+        f"{threshold:,} joint\nobservations behind it (parlay."
+        "min_correlation_sample). Below that the prior\nis used and the pair "
+        "is reported as prior-based."
+    )
+    db.close()
+    return 0
+
+
+def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
+    """
+    Print the payout table exactly as loaded, so it can be checked against
+    what the account actually offers.
+
+    These multipliers vary by state and change without notice. They are the
+    single input most likely to be silently wrong, and an EV built on the
+    wrong ladder is not slightly wrong -- a 5-pick paying 10x instead of 20x
+    turns a good bet into a bad one.
+    """
+    from . import parlay as P
+
+    table = P.PayoutTable.load(cfg.parlay.payouts_path)
+    print(f"Payout table: {table.path}")
+    print(f"Last verified by you: {table.last_verified_by_user or 'never'}\n")
+
+    for key in sorted(table.products):
+        product = table.products[key]
+        mark = "verified" if product.verified else "NOT VERIFIED"
+        print(f"{key}  ({product.title}, {product.book}, {product.kind})  [{mark}]")
+        print(
+            f"  same player twice: "
+            f"{'allowed' if product.allows_same_player else 'not allowed'}"
+            f"   |   a pushed leg: {product.void_behaviour}"
+            + (f" -> {product.reduces_to}" if product.reduces_to else "")
+        )
+        if not product.payouts:
+            print("  priced by the book at entry time, not from this table")
+        for legs in product.leg_counts:
+            vector = product.payouts[legs]
+            parts = "  ".join(
+                f"{k}/{legs}: {v:g}x" for k, v in enumerate(vector) if v > 0
+            )
+            breakeven = product.breakeven_leg_prob(legs)
+            print(
+                f"  {legs}-pick   {parts or '(nothing pays)'}"
+                f"   -- needs {breakeven:.1%} a leg if the legs were independent"
+            )
+        print()
+
+    if table.unverified:
+        print(
+            "CHECK THESE BEFORE TRUSTING ANY EV NUMBER:\n  "
+            + ", ".join(table.unverified)
+            + f"\n\nOpen your account, read what a 2-pick, a 3-pick and a "
+            "5-pick actually pay\nin your state, edit "
+            f"{table.path}\nto match, and set `verified: true` on the ones you "
+            "checked."
+        )
+    else:
+        print("Every product is marked verified.")
+    return 0
+
+
+def cmd_parlay_bet(cfg: Config, args) -> int:
+    db = Database(cfg.database)
+    bet_id = db.place_parlay_bet(
+        args.ticket_id, stake=args.stake, book=args.book, notes=args.notes
+    )
+    bet = db.get_parlay_bet(bet_id)
+    print(
+        f"Logged parlay bet #{bet_id}: {bet['n_legs']}-leg {bet['product']} "
+        f"on {bet['book']} for {bet['stake']:,.0f} "
+        f"(EV {bet['ev_at_bet']:+.1%}, P(all) {bet['joint_prob_at_bet']:.1%})"
+    )
+    print(f"Settle it with:  betedge parlay settle {bet_id} --hit <legs>")
+    db.close()
+    return 0
+
+
+def cmd_parlay_settle(cfg: Config, args) -> int:
+    db = Database(cfg.database)
+    pnl = db.settle_parlay_bet(
+        args.bet_id, args.hit, legs_void=args.void,
+        payouts_path=cfg.parlay.payouts_path,
+    )
+    bet = db.get_parlay_bet(args.bet_id)
+    print(
+        f"Parlay bet #{args.bet_id} settled {bet['status']} "
+        f"({args.hit}/{bet['n_legs']} legs"
+        + (f", {args.void} void" if args.void else "")
+        + f"): {pnl:+,.2f}"
+    )
     db.close()
     return 0
 
@@ -692,7 +1034,94 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("close", help="capture closing lines for open bets")
     s.add_argument("--window", type=float, default=20.0,
                    help="minutes before start to start capturing")
+    s.add_argument("--no-parlays", action="store_true",
+                   help="skip closing-line capture for multi-leg tickets")
     s.set_defaults(func=cmd_close)
+
+    # ---- parlay / pick'em -------------------------------------------
+    p_parlay = sub.add_parser(
+        "parlay",
+        help="multi-leg pick'em and parlay tickets",
+        description="Build multi-leg tickets whose joint probability beats "
+                    "what the payout structure assumes.",
+    )
+    psub = p_parlay.add_subparsers(dest="parlay_command", required=True)
+
+    s = psub.add_parser("scan", help="build and rank tickets")
+    s.add_argument("--sports", nargs="+", help="override configured sports")
+    s.add_argument("--products", nargs="+", metavar="KEY",
+                   help="payout structures to build for, e.g. underdog_standard")
+    s.add_argument("--limit", type=int, default=8, help="tickets to print")
+    s.add_argument("--bankroll", type=float)
+    s.add_argument("--min-ev", type=float, help="e.g. 0.03 for +3%%")
+    s.add_argument("--max-legs", type=int)
+    s.add_argument("--draws", type=int,
+                   help="Monte Carlo draws for the final estimate")
+    s.add_argument("--max-events", type=int,
+                   help="cap events per sport (saves credits)")
+    s.add_argument("--rosters", metavar="FILE",
+                   help="player,team CSV or YAML. Without it, two players in "
+                        "one game cannot be told apart as team mates or "
+                        "opponents and the weaker blended priors are used.")
+    s.add_argument("--interpolate", action="store_true",
+                   help="estimate a leg's probability from Pinnacle's "
+                        "neighbouring lines when it does not price the exact "
+                        "one. Off by default; marks every leg it touches.")
+    s.add_argument("--grouping", choices=["same_game", "same_slate", "any"],
+                   help="which legs may be combined (default same_game)")
+    s.add_argument("--offered-price", type=float, metavar="DECIMAL",
+                   help="the parlay price the book actually shows, applied to "
+                        "tickets of --max-legs legs. For a same-game parlay "
+                        "this is well below the product of the legs, so "
+                        "without it the EV is an upper bound the book will "
+                        "never pay.")
+    s.add_argument("--ignore-budget", action="store_true",
+                   help="ignore the daily credit allowance")
+    s.add_argument("--hide-suspect", action="store_true")
+    s.add_argument("--no-report", action="store_true")
+    s.set_defaults(func=cmd_parlay_scan)
+
+    s = psub.add_parser(
+        "coverage",
+        help="probe the API for usable prop coverage, per sport",
+    )
+    s.add_argument("--sports", nargs="+")
+    s.add_argument("--max-events", type=int, default=2,
+                   help="events to probe per sport. This bills like a scan.")
+    s.set_defaults(func=cmd_parlay_coverage)
+
+    s = psub.add_parser(
+        "correlations",
+        help="fit pairwise correlations from game logs, and show what is stored",
+    )
+    s.add_argument("--from", dest="source", metavar="CSV",
+                   help="game log to fit from. Columns: game_id, sport, "
+                        "player, team, market, value[, date]")
+    s.add_argument("--markets", nargs="+", help="only fit these market keys")
+    s.add_argument("--max-pairs", type=int, default=200_000,
+                   help="cap on joint observations kept per market pair")
+    s.set_defaults(func=cmd_parlay_correlations)
+
+    s = psub.add_parser(
+        "verify-payouts",
+        help="print the payout table so it can be checked against your account",
+    )
+    s.set_defaults(func=cmd_parlay_verify_payouts)
+
+    s = psub.add_parser("bet", help="log a multi-leg entry you placed")
+    s.add_argument("ticket_id", type=int)
+    s.add_argument("--stake", type=float, required=True)
+    s.add_argument("--book")
+    s.add_argument("--notes")
+    s.set_defaults(func=cmd_parlay_bet)
+
+    s = psub.add_parser("settle", help="settle an entry by how many legs landed")
+    s.add_argument("bet_id", type=int)
+    s.add_argument("--hit", type=int, required=True, metavar="N",
+                   help="legs that won")
+    s.add_argument("--void", type=int, default=0, metavar="N",
+                   help="legs that pushed and shrank the entry")
+    s.set_defaults(func=cmd_parlay_settle)
 
     s = sub.add_parser("report", help="performance and closing-line value")
     s.set_defaults(func=cmd_report)

@@ -1,0 +1,140 @@
+# ===========================================================================
+# PAYOUT STRUCTURES
+#
+# READ THIS BEFORE TRUSTING ANY EV NUMBER THIS TOOL PRINTS.
+#
+# These multipliers are NOT facts. They vary by state, by promotion, by
+# account, and they change without notice. Underdog and PrizePicks have
+# both repriced their flex ladders more than once, and several states run
+# reduced tables that look identical in the app until you read the payout
+# line. An EV computed from the wrong table is not slightly wrong -- the
+# difference between a 5-pick paying 20x and one paying 10x is the
+# difference between a good bet and a terrible one.
+#
+# So: open your account, look at what a 2-pick, a 3-pick and a 5-pick
+# actually pay in your state, and edit this file to match. Then set
+# `verified: true` on the products you checked. Anything left unverified
+# is flagged on every ticket built from it.
+#
+#   betedge parlay verify-payouts        prints exactly what is loaded here
+#
+# ---------------------------------------------------------------------------
+# HOW A STRUCTURE IS WRITTEN
+#
+# `payouts` maps a leg count to a vector of TOTAL RETURN multiples indexed
+# by how many legs hit. Index k is what a 1-unit entry returns when
+# exactly k legs win, stake included -- so 0 means the entry is lost and
+# 1.0 means the stake comes back. Expected value is then
+#
+#     EV = sum_k P(exactly k hit) * payouts[n][k]  -  1
+#
+# A vector for an n-leg entry has n+1 entries, for k = 0..n.
+#
+# `void_behaviour` says what a pushed leg does:
+#   reduce  -- the leg drops out and the entry pays the (n-1)-leg table.
+#              This is what the pick'em sites do, and it is why the
+#              smaller tables must be present even if you never enter one.
+#   refund  -- any push refunds the whole entry.
+# ===========================================================================
+
+meta:
+  version: 1
+  # Bump this and re-check when you last confirmed the numbers in the app.
+  last_verified_by_user: null
+
+products:
+
+  # -----------------------------------------------------------------------
+  # Underdog Fantasy -- standard ("Higher/Lower") entries. All legs must
+  # hit. This is the primary target of the whole optimizer: the multiple
+  # is fixed by leg count and takes no account of which legs you picked,
+  # so two legs that describe the same underlying event are paid as though
+  # they were independent.
+  # -----------------------------------------------------------------------
+  underdog_standard:
+    book: underdog
+    kind: pickem
+    title: "Underdog standard"
+    verified: false
+    allows_same_player: false     # verify: some slates permit it, most do not
+    void_behaviour: reduce
+    payouts:
+      2: [0, 0, 3.0]
+      3: [0, 0, 0, 6.0]
+      4: [0, 0, 0, 0, 10.0]
+      5: [0, 0, 0, 0, 0, 20.0]
+
+  # Underdog insured / flex entries. Missing one leg still returns
+  # something, which changes the EV materially -- modelling only the
+  # all-hit case on a flex entry understates it badly, and modelling a
+  # standard entry with flex numbers overstates it just as badly.
+  underdog_flex:
+    book: underdog
+    kind: pickem
+    title: "Underdog flex (insured)"
+    verified: false
+    allows_same_player: false
+    void_behaviour: reduce
+    # A 3-leg flex entry with one pushed leg becomes an ordinary 2-pick,
+    # because there is no 2-leg flex table to fall back to. Verify which
+    # table your account actually applies -- this is the single most
+    # commonly misunderstood corner of these products.
+    reduces_to: underdog_standard
+    payouts:
+      3: [0, 0, 1.25, 2.25]
+      4: [0, 0, 0, 1.5, 6.0]
+      5: [0, 0, 0, 0.4, 2.5, 10.0]
+
+  # -----------------------------------------------------------------------
+  # PrizePicks. Same idea, different ladder. Power Play is all-or-nothing;
+  # Flex Play insures the near miss.
+  # -----------------------------------------------------------------------
+  prizepicks_power:
+    book: prizepicks
+    kind: pickem
+    title: "PrizePicks Power Play"
+    verified: false
+    allows_same_player: false
+    void_behaviour: reduce
+    payouts:
+      2: [0, 0, 3.0]
+      3: [0, 0, 0, 5.0]
+      4: [0, 0, 0, 0, 10.0]
+      5: [0, 0, 0, 0, 0, 20.0]
+      6: [0, 0, 0, 0, 0, 0, 37.5]
+
+  prizepicks_flex:
+    book: prizepicks
+    kind: pickem
+    title: "PrizePicks Flex Play"
+    verified: false
+    allows_same_player: false
+    void_behaviour: reduce
+    reduces_to: prizepicks_power     # a pushed leg drops a flex entry to the power table
+    payouts:
+      3: [0, 0, 1.25, 2.25]
+      4: [0, 0, 0, 1.5, 5.0]
+      5: [0, 0, 0, 0.4, 2.0, 10.0]
+      6: [0, 0, 0, 0, 0.4, 2.0, 25.0]   # 4/6 -> 0.4x, 5/6 -> 2x, 6/6 -> 25x
+
+  # -----------------------------------------------------------------------
+  # DraftKings parlays. NOT a fixed-multiplier product: the price comes
+  # from the book, leg by leg, and for a same-game parlay DraftKings
+  # applies its own correlation model and prices the combination BELOW the
+  # product of the legs. That discount is the whole difficulty -- an edge
+  # here means their correlation estimate is wrong, not merely that
+  # correlation exists.
+  #
+  # The payout vector is therefore built at runtime from the prices, not
+  # read from here; this entry exists to carry the rules. Pass the price
+  # the app actually shows with --offered-price, because the product of
+  # the legs is an upper bound that a same-game parlay will never pay.
+  # -----------------------------------------------------------------------
+  draftkings_parlay:
+    book: draftkings
+    kind: parlay
+    title: "DraftKings parlay"
+    verified: true                # the price comes from the book, not from here
+    allows_same_player: true      # DK will correlate two props on one player
+    void_behaviour: reduce        # a voided leg drops out and the parlay reprices
+    payouts: {}

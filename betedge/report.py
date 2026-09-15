@@ -388,6 +388,44 @@ def performance_report_html(db: Database, cfg: Config) -> str:
         else ""
     )
 
+    # Multi-leg entries are reported separately rather than pooled in with
+    # single bets. Their variance is an order of magnitude higher, so a
+    # combined ROI is dominated by whichever kind happened to run hot and
+    # tells you nothing about either.
+    p = db.parlay_summary()
+    if p["tickets_generated"]:
+        parlay_cards = "".join(
+            f'<div class="card"><div class="k">{_esc(k)}</div>'
+            f'<div class="v">{_esc(v)}</div></div>'
+            for k, v in [
+                ("Tickets generated", fmt(p["tickets_generated"])),
+                ("Entries settled", fmt(p["entries_settled"])),
+                ("Entries pending", fmt(p["entries_pending"])),
+                ("Staked", f"{p['total_staked']:,.0f}"),
+                ("P&L", fmt(p["total_pnl"], "money")),
+                ("ROI", fmt(p["roi"], "pct")),
+                ("Avg ticket CLV", fmt(p["avg_ticket_clv"], "pct")),
+            ]
+        )
+        parlay_note = (
+            f"Ticket closing-line value is measured on {p['clv_sample']} ticket(s). "
+            "It is the only fast read on whether the multi-leg model works: profit "
+            "and loss on parlays is so noisy that a hundred settled entries still "
+            "say nothing, whereas re-pricing every leg at the close and recomputing "
+            "the joint probability gives a comparable number on every ticket, bet "
+            "or not."
+            if p["clv_sample"]
+            else "No ticket closing lines captured yet. Run <code>betedge close</code> "
+            "before each game starts &mdash; tickets that were never bet are captured "
+            "too, and they are most of the evidence."
+        )
+        parlay_html = (
+            f'<h2>Multi-leg tickets</h2><div class="cards">{parlay_cards}</div>'
+            f'<p class="note">{parlay_note}</p>'
+        )
+    else:
+        parlay_html = ""
+
     stamp = datetime.now(timezone.utc).astimezone().strftime("%a %d %b %Y, %H:%M %Z")
     return f"""<title>Betting Performance</title>
 <style>{_CSS}</style>
@@ -398,6 +436,7 @@ def performance_report_html(db: Database, cfg: Config) -> str:
 {expected}
 <p class="note">{clv_note}</p>
 {open_html}
+{parlay_html}
 {group_table("sport", "sport")}
 {group_table("market", "market")}
 {group_table("book", "book")}
@@ -428,3 +467,320 @@ def write_report(path: str | Path, content: str, standalone: bool = True) -> Pat
         _SKELETON.format(content=content) if standalone else content, encoding="utf-8"
     )
     return p
+
+
+# --------------------------------------------------------------------------
+# Multi-leg tickets
+#
+# Every view here puts correlated EV next to independent EV, because that
+# comparison is the one thing a reader must not be able to miss. A ticket
+# that is positive only under an assumed correlation is a hypothesis, and
+# a report that showed only the correlated number would present it as a
+# finding.
+# --------------------------------------------------------------------------
+
+
+def parlay_console(tickets: Sequence, limit: int = 12, title: str = "") -> str:
+    """One line per ticket, with the legs indented beneath it."""
+    if not tickets:
+        return "No tickets cleared the thresholds."
+
+    out = []
+    if title:
+        out.append(title)
+    header = (
+        f"{'id':>4}  {'EV':>7}  {'indep':>7}  {'P(all)':>7}  {'mult':>6}  "
+        f"{'stake':>6}  legs"
+    )
+    out.append(header)
+    out.append("-" * len(header))
+
+    for i, t in enumerate(tickets[:limit], 1):
+        ident = t.db_id if getattr(t, "db_id", None) else i
+        stake = f"{t.recommended_stake:,.0f}" if t.recommended_stake else "-"
+        out.append(
+            f"{ident:>4}  {t.ev:>+6.1%}  {t.ev_independent:>+6.1%}  "
+            f"{t.joint_prob:>6.1%}  {t.payout_all_hit:>5.1f}x  {stake:>6}  "
+            f"{t.n_legs}-leg {t.product.title}"
+        )
+        for leg in t.legs:
+            out.append(
+                f"        {leg.description:<44.44} "
+                f"p={leg.hit_prob:>5.1%}  {pretty_market(leg.market):<16.16} "
+                f"{leg.matchup[:34]}"
+            )
+        out.append(
+            f"        correlation: {t.correlation.summary()}"
+            + (f"  |  {', '.join(t.flags[:3])}" if t.flags else "")
+        )
+    if len(tickets) > limit:
+        out.append(f"\n... and {len(tickets) - limit} more.")
+    return "\n".join(out)
+
+
+def sorted_by_ev(tickets: Sequence) -> list:
+    """Expected value first. Never the payout multiple."""
+    return sorted(tickets, key=lambda t: t.ev, reverse=True)
+
+
+def sorted_by_ev_per_variance(tickets: Sequence) -> list:
+    return sorted(tickets, key=lambda t: t.ev_per_variance, reverse=True)
+
+
+def parlay_summary(result) -> str:
+    took = (result.finished_at - result.started_at).total_seconds()
+    lines = [
+        f"Scanned {result.events_scanned} events across "
+        f"{', '.join(result.sports) or 'nothing'} in {took:.0f}s",
+        f"{result.legs_built:,} legs built, {result.legs_after_filter:,} survived "
+        f"the filters, {result.groups_searched} group(s) searched",
+        f"{result.candidates_evaluated:,} distinct tickets evaluated, "
+        f"{len(result.clean)} clean, {len(result.suspect)} suspect",
+        f"Products: {', '.join(result.products)}",
+        f"Credits: {result.credits_spent} spent this run"
+        + (
+            f", {result.credits_remaining:,} remaining"
+            if result.credits_remaining is not None
+            else ""
+        ),
+    ]
+    if result.rejections:
+        top = sorted(result.rejections.items(), key=lambda kv: -kv[1])[:6]
+        lines.append("Filtered out: " + ", ".join(f"{k} ({v:,})" for k, v in top))
+    if result.errors:
+        lines.append(f"{len(result.errors)} error(s): " + " | ".join(result.errors[:3]))
+    return "\n".join(lines)
+
+
+def _correlation_rows(ticket) -> str:
+    rows = []
+    for pair in ticket.correlation.pairs:
+        a, b = ticket.legs[pair.i], ticket.legs[pair.j]
+        badge = {
+            "empirical": '<span class="src-measured">measured</span>',
+            "prior": '<span class="src-prior">prior</span>',
+            "default": '<span class="src-default">default</span>',
+        }.get(pair.source, _esc(pair.source))
+        sample = f"n={pair.sample_size:,}" if pair.sample_size else "&mdash;"
+        rows.append(
+            f"<tr><td class='dim'>{_esc(a.description)}</td>"
+            f"<td class='dim'>{_esc(b.description)}</td>"
+            f"<td class='dim'>{_esc(pair.relation.replace('_', ' '))}</td>"
+            f"<td class='num'>{pair.rho:+.2f}</td>"
+            f"<td>{badge}</td><td class='num dim'>{sample}</td></tr>"
+        )
+    if not rows:
+        return ""
+    return f"""<table class="inner">
+<thead><tr><th>Leg</th><th>Leg</th><th>Relation</th><th class="num">&rho;</th>
+<th>Source</th><th class="num">Sample</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table>"""
+
+
+def _leg_rows(ticket) -> str:
+    rows = []
+    for leg in ticket.legs:
+        push = f"{leg.push_prob:.1%}" if leg.push_prob else "&mdash;"
+        line_note = (
+            '<span class="flag">interpolated</span>'
+            if leg.line_source != "exact"
+            else ""
+        )
+        rows.append(
+            f"<tr><td class='bet'>{_esc(leg.description)}</td>"
+            f"<td class='dim'>{_esc(pretty_market(leg.market))}</td>"
+            f"<td class='dim'>{_esc(leg.matchup)}</td>"
+            f"<td class='num'>{leg.fair_prob:.1%}</td>"
+            f"<td class='num'>{push}</td>"
+            f"<td class='num'>{leg.hit_prob:.1%}</td>"
+            f"<td class='num dim'>{leg.sharp_price_taken:.2f} / "
+            f"{leg.sharp_price_other:.2f}</td>"
+            f"<td class='dim'>{_esc(leg.book)} {line_note}</td></tr>"
+        )
+    return f"""<table class="inner">
+<thead><tr><th>Leg</th><th>Market</th><th>Game</th>
+<th class="num">Pinnacle fair</th><th class="num">Push</th>
+<th class="num">Hits</th><th class="num">Pinnacle o/u</th><th>Book</th></tr></thead>
+<tbody>{''.join(rows)}</tbody></table>"""
+
+
+def _ticket_block(ticket, index: int) -> str:
+    flags = "".join(f'<span class="flag">{_esc(f)}</span>' for f in ticket.flags)
+    ident = ticket.db_id if getattr(ticket, "db_id", None) else index
+
+    if ticket.correlation_is_load_bearing:
+        verdict = (
+            '<div class="alarm">This ticket is positive ONLY because of the '
+            'assumed correlation. With the legs treated as independent it is '
+            f'{ticket.ev_independent:+.1%}. The case for betting it is a '
+            'correlation estimate, not a price.</div>'
+        )
+    elif ticket.correlation.all_prior:
+        verdict = (
+            '<div class="caution">Every correlation here comes from a '
+            'structural prior, not from measured data. Treat the number as a '
+            'hypothesis until the pairs have game logs behind them.</div>'
+        )
+    else:
+        verdict = ""
+
+    dist = "".join(
+        f"<td class='num'>{p:.1%}</td>" for p in ticket.hit_distribution
+    )
+    dist_head = "".join(
+        f"<th class='num'>{k}</th>" for k in range(ticket.n_legs + 1)
+    )
+    payout_row = "".join(
+        f"<td class='num dim'>"
+        f"{ticket.product.multiple_grid(ticket.n_legs)[0, k]:g}x</td>"
+        for k in range(ticket.n_legs + 1)
+    )
+
+    return f"""<div class="ticket">
+<div class="thead">
+  <div><span class="tid">#{_esc(ident)}</span>
+       <span class="bet">{ticket.n_legs}-leg {_esc(ticket.product.title)}</span>
+       <span class="dim">{_esc(ticket.legs[0].matchup)}</span></div>
+  <div><span class="ev">{ticket.ev:+.1%}</span>
+       <span class="vs">vs {ticket.ev_independent:+.1%} independent</span></div>
+</div>
+{verdict}
+<div class="stats">
+  <span><b>P(all hit)</b> {ticket.joint_prob:.2%} &plusmn; {ticket.joint_prob_se:.2%}</span>
+  <span><b>independence assumes</b> {ticket.joint_prob_independent:.2%}</span>
+  <span><b>pays</b> {ticket.payout_all_hit:g}x</span>
+  <span><b>EV/variance</b> {ticket.ev_per_variance:.3f}</span>
+  <span><b>stake</b> {ticket.recommended_stake:,.0f}</span>
+</div>
+{_leg_rows(ticket)}
+<div class="sub2">Correlation used, pair by pair</div>
+{_correlation_rows(ticket)}
+<div class="sub2">Payout structure &mdash; probability of exactly k legs hitting,
+and what k pays</div>
+<table class="inner"><thead><tr><th>legs hit</th>{dist_head}</tr></thead>
+<tbody><tr><td class="dim">probability</td>{dist}</tr>
+<tr><td class="dim">pays</td>{payout_row}</tr></tbody></table>
+<div class="flags">{flags}</div>
+</div>"""
+
+
+_PARLAY_CSS = """
+.ticket{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+padding:14px 16px;margin-bottom:14px}
+.thead{display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;
+align-items:baseline;margin-bottom:8px}
+.tid{color:var(--muted);font-variant-numeric:tabular-nums;margin-right:8px}
+.vs{color:var(--muted);font-size:12.5px;margin-left:8px}
+.stats{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12.5px;color:var(--muted);
+margin-bottom:12px}
+.stats b{color:var(--ink);font-weight:600}
+.alarm{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:9px 12px;
+font-size:13px;margin-bottom:10px;line-height:1.5}
+.caution{color:var(--muted);font-size:12.5px;margin-bottom:10px;line-height:1.5}
+table.inner{border-collapse:collapse;width:100%;font-size:12.5px;margin-bottom:10px}
+table.inner th{text-align:left;font-weight:600;color:var(--muted);font-size:10.5px;
+text-transform:uppercase;letter-spacing:.05em;padding:6px 8px;
+border-bottom:1px solid var(--line);white-space:nowrap}
+table.inner td{padding:5px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.sub2{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+margin:12px 0 6px}
+.src-measured{background:var(--pos-bg);color:var(--pos);border-radius:4px;
+padding:1px 6px;font-size:11px}
+.src-prior{background:var(--warn-bg);color:var(--warn);border-radius:4px;
+padding:1px 6px;font-size:11px}
+.src-default{color:var(--muted);font-size:11px}
+.flags{margin-top:4px}
+.tablewrap{overflow-x:auto}
+"""
+
+
+def parlay_report_html(result, cfg: Config, title: str = "Parlay scan") -> str:
+    """
+    The full ticket report.
+
+    Ordered by expected value, never by payout multiple. A 20x ticket at
+    -8% is a worse bet than a 3x at +4%, and a report sorted by multiple
+    would say the opposite at a glance, which is the single easiest way to
+    make this tool harmful.
+    """
+    stamp = result.finished_at.astimezone().strftime("%a %d %b %Y, %H:%M %Z")
+    by_ev = sorted(result.clean, key=lambda t: t.ev, reverse=True)
+    by_risk = sorted(result.clean, key=lambda t: t.ev_per_variance, reverse=True)
+
+    total_stake = sum(t.recommended_stake for t in result.clean)
+    cards = [
+        ("Tickets", str(len(result.clean))),
+        ("Suspect", str(len(result.suspect))),
+        ("Best EV", f"{by_ev[0].ev:+.1%}" if by_ev else "—"),
+        ("Legs built", f"{result.legs_built:,}"),
+        ("Evaluated", f"{result.candidates_evaluated:,}"),
+        ("Credits used", f"{result.credits_spent:,}"),
+        ("Total stake", f"{total_stake:,.0f}"),
+    ]
+    card_html = "".join(
+        f'<div class="card"><div class="k">{_esc(k)}</div>'
+        f'<div class="v">{_esc(v)}</div></div>'
+        for k, v in cards
+    )
+
+    def section(tickets, empty: str) -> str:
+        if not tickets:
+            return f'<div class="scroll"><div class="empty">{_esc(empty)}</div></div>'
+        return "".join(_ticket_block(t, i) for i, t in enumerate(tickets, 1))
+
+    risk_note = ""
+    if by_risk and by_ev and by_risk[0] is not by_ev[0]:
+        risk_note = (
+            '<p class="note">The best ticket by expected value and the best by '
+            'expected value per unit of variance are not the same ticket. They '
+            'answer different questions &mdash; how much this makes, and how '
+            'much it makes for the risk it carries &mdash; so both orderings '
+            'are shown rather than blended into one score that answers '
+            'neither.</p>'
+        )
+
+    rejected = ""
+    if result.rejections:
+        items = sorted(result.rejections.items(), key=lambda kv: -kv[1])
+        rejected = "<br>".join(
+            f"{_esc(k.replace('_', ' '))}: {v:,}" for k, v in items
+        )
+        rejected = (
+            f'<h2>Why legs were filtered out</h2>'
+            f'<p class="note">{rejected}</p>'
+        )
+
+    return f"""<title>Parlay Scan {stamp}</title>
+<style>{_CSS}{_PARLAY_CSS}</style>
+<div class="wrap">
+<h1>{_esc(title)}</h1>
+<p class="sub">{_esc(stamp)} &middot; {_esc(', '.join(result.sports))} &middot;
+{_esc(', '.join(result.products))} &middot; marginals de-vigged from
+{_esc(cfg.books.sharp)} ({_esc(cfg.model.devig_method)}) &middot;
+{cfg.parlay.draws:,} Monte Carlo draws</p>
+<div class="cards">{card_html}</div>
+
+<h2>Ranked by expected value</h2>
+{section(by_ev[: cfg.parlay.top_n], "Nothing cleared the thresholds. That is the normal result.")}
+
+<h2>Ranked by expected value per unit of variance</h2>
+{risk_note}
+{section(by_risk[: cfg.parlay.top_n], "Nothing to rank.")}
+
+<h2>Suspect</h2>
+{section(result.suspect[:10], "Nothing flagged as suspect.")}
+<p class="note">These tripped a guard &mdash; an edge too large to believe, a
+Monte Carlo error comparable to the edge itself, an interpolated line, or an
+expected value that only exists because correlation was assumed. No stake is
+recommended for any of them.</p>
+
+<p class="note"><b>Read the two EV numbers together.</b> The correlated figure is
+what this model believes; the independent one is what the payout structure
+assumes. The gap between them is the entire claim being made, and it rests on
+correlation inputs that are marked, pair by pair, as measured or assumed.
+Payout multiples come from
+<code>{_esc(str(cfg.parlay.payouts_path or 'betedge/data/payouts.yaml'))}</code>
+and are configuration, not fact &mdash; verify them against your account with
+<code>betedge parlay verify-payouts</code> before acting on any number here.</p>
+{rejected}
+</div>"""

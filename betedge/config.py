@@ -115,6 +115,93 @@ class BankrollConfig:
 
 
 @dataclass
+class ParlayConfig:
+    """
+    The multi-leg optimizer. See parlay.py.
+
+    Everything here is deliberately stricter than the single-bet path. A
+    parlay compounds the error in every leg's probability estimate, its
+    payoff is lumpy, and correlated legs have fatter tails than any of the
+    individual bets do -- so the Kelly fraction is halved again, the
+    plausibility ceiling is treated as a hard stop, and a ticket that is
+    only positive because of an ASSUMED correlation is never staked
+    silently.
+    """
+
+    # Which payout structures to build tickets for. Names come from
+    # betedge/data/payouts.yaml; see `betedge parlay verify-payouts`.
+    products: list[str] = field(default_factory=lambda: ["underdog_standard"])
+    # Override the shipped data files. None uses what ships with betedge.
+    payouts_path: str | None = None
+    priors_path: str | None = None
+    # player,team CSV or YAML. Without it, two players in one game cannot
+    # be told apart as team mates or opponents and every same-game pair
+    # falls back to the weak generic prior. Nothing is shipped because a
+    # roster goes stale in a week.
+    rosters_path: str | None = None
+
+    # Monte Carlo. The seed is fixed so a re-run does not reshuffle the
+    # ranking; the standard error is reported rather than hidden.
+    draws: int = 200_000
+    search_draws: int = 8_000
+    seed: int = 20260915
+
+    # Search shape. Beam search, not enumeration: the number of 5-leg
+    # subsets of 40 candidates is 658,008, and each one needs a simulation.
+    min_legs: int = 2
+    max_legs: int = 5
+    beam_width: int = 24
+    max_candidates_per_group: int = 32
+    top_n: int = 12
+    # same_game is the default because that is where correlation lives. A
+    # quarterback in one game and a centre in another have no structural
+    # relationship and only add variance.
+    grouping: str = "same_game"
+    slate_hours: float = 12.0
+
+    # Bars and guards.
+    min_ev: float = 0.02
+    # Above this something is wrong -- a mismatched line, a stale quote, or
+    # a payout table that does not match what the account actually offers.
+    # A genuine pick'em edge is a few points, not forty.
+    max_plausible_ev: float = 0.25
+    # Flag when the Monte Carlo noise is large next to the edge itself.
+    max_se_ratio: float = 0.25
+    # How far below the product's break-even a single leg may sit. Negative
+    # on purpose: correlation is supposed to make up a small shortfall, and
+    # a filter at 0 would reject every ticket the tool exists to find.
+    min_leg_edge: float = -0.03
+    min_leg_prob: float = 0.25
+    max_leg_prob: float = 0.90
+    # For books that post a price (DraftKings), the single-bet EV floor.
+    min_leg_ev: float = -0.06
+    # Report a pair as probable negative correlation at or below this.
+    negative_pair_threshold: float = -0.10
+
+    # Staking. An eighth of Kelly rather than the single-bet quarter.
+    kelly_multiplier: float = 0.125
+    max_ticket_fraction: float = 0.01
+    # Five tickets on one game are one bet, not five.
+    max_game_exposure_fraction: float = 0.05
+
+    # Joint observations needed before a fitted correlation displaces the
+    # structural prior.
+    min_correlation_sample: int = 100
+
+    # Comparing a pick'em line against a Pinnacle line at a different
+    # number is not a measurement. Off by default; when on, every leg it
+    # touches is marked estimated.
+    allow_line_interpolation: bool = False
+    max_interpolation_distance: float = 1.0
+
+    # Books whose legs are fixed-multiplier pick'em selections.
+    pickem_books: list[str] = field(default_factory=lambda: ["underdog"])
+    # Push probability to assume on an integer line when Pinnacle does not
+    # price both surrounding half-lines. Flagged wherever it is used.
+    assumed_push_prob: float = 0.05
+
+
+@dataclass
 class BudgetConfig:
     """
     Monthly credit plan. The per-scan ceiling in ApiConfig stops one runaway
@@ -143,6 +230,7 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     bankroll: BankrollConfig = field(default_factory=BankrollConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    parlay: ParlayConfig = field(default_factory=ParlayConfig)
     # Sports scanned for PLAYER PROPS. Expensive: one call per event per
     # market off the per-event endpoint.
     sports: list[str] = field(
@@ -198,6 +286,7 @@ class Config:
             model=ModelConfig(**raw.get("model", {})),
             bankroll=BankrollConfig(**raw.get("bankroll", {})),
             budget=BudgetConfig(**raw.get("budget", {})),
+            parlay=ParlayConfig(**raw.get("parlay", {})),
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
             excluded_sports=(

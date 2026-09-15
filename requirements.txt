@@ -1,3 +1,7 @@
 requests>=2.31
 PyYAML>=6.0
 openpyxl>=3.1
+# The Gaussian copula in betedge/copula.py: multivariate normal draws,
+# the eigendecomposition behind the PSD projection, and the Cholesky
+# factor. Everything else in betedge is pure standard library.
+numpy>=1.24
