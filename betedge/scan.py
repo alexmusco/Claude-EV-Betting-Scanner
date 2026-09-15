@@ -27,7 +27,12 @@ from typing import Any, Iterable, Sequence
 
 from . import liquidity, pricing
 from .config import Config
-from .markets import estimate_credits, expand_sport_keys
+from .markets import (
+    estimate_credits,
+    expand_sport_keys,
+    market_adds_information,
+    pretty_market,
+)
 from .oddsapi import CreditBudgetExceeded, OddsApiClient
 
 log = logging.getLogger(__name__)
@@ -115,20 +120,7 @@ class Opportunity:
 
     @property
     def description(self) -> str:
-        side = (self.side or "").strip().lower()
-        if side in OVER_NAMES or side in UNDER_NAMES:
-            # A player prop names the player; a game total does not, and
-            # its selection field just repeats "Over"/"Under".
-            base = (
-                self.selection
-                if self.selection and self.selection.strip().lower() != side
-                else "Total"
-            )
-            out = f"{base} {self.side}"
-            return out if self.line is None else f"{out} {self.line:g}"
-        if self.line is None:
-            return f"{self.selection} ML"          # moneyline
-        return f"{self.selection} {self.line:+g}"  # spread / handicap
+        return _render_bet(self.selection, self.side, self.line, self.market)
 
     def to_row(self) -> dict:
         d = asdict(self)
@@ -356,6 +348,43 @@ def group_sharp_markets(
     return {k: v for k, v in groups.items() if len(v) >= 2}
 
 
+def _render_bet(selection, side, line, market=None) -> str:
+    """
+    The one place a bet is turned into words.
+
+    A prop needs three things to be placeable: who, what stat, and what
+    number. Dropping any of them produces a string that reads fine and
+    cannot be acted on -- "Max Fried Under 4.5" could be strikeouts, hits
+    allowed or outs, and with four MLB prop markets configured that is not
+    a hypothetical.
+
+    The market is omitted only where the selection already carries it: a
+    moneyline or a spread names the team, so "Chiefs ML (H2H)" is noise.
+    """
+    s = (side or "").strip().lower()
+    if s in OVER_NAMES or s in UNDER_NAMES:
+        base = (selection if selection
+                and selection.strip().lower() != s else "Total")
+        out = f"{base} {side}"
+        if line is not None:
+            out = f"{out} {line:g}"
+    elif line is None:
+        out = f"{selection} ML"
+    else:
+        out = f"{selection} {line:+g}"
+    if market and market_adds_information(market):
+        label = pretty_market(market)
+        # "Total Over 8.5 (Total)" helps nobody.
+        if label.lower() not in out.lower():
+            out = f"{out} ({label})"
+    return out
+
+
+def describe_quote(q: Quote) -> str:
+    """Full human-readable bet: who, what stat, what number."""
+    return _render_bet(q.selection, q.side, q.line, q.market)
+
+
 def describe_side(q: Quote) -> str:
     """Human-readable side label for the report and the bet log."""
     side = (q.side or "").strip().lower()
@@ -479,8 +508,7 @@ def evaluate_event(
                     matchup=f"{meta.get('away_team')} @ {meta.get('home_team')}",
                     market=q.market,
                     tier=liq.tier,
-                    description=describe_side(q) if q.selection == q.side
-                    else f"{q.selection} {describe_side(q)}",
+                    description=describe_quote(q),
                     book=q.book,
                     soft_price=q.price,
                     sharp_price=sharp_same,

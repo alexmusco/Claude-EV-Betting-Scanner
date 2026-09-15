@@ -71,7 +71,16 @@ model:
   # every method.
   devig_method: worst_case
 
-  min_ev: 0.02                 # the base bar, for deep markets
+  # The base bar, for deep markets. Props sit above this once the
+  # liquidity adjustment is applied (about +2.1% at 1.5% base).
+  #
+  # 1.5% rather than 2% deliberately, and it is not a loosening of
+  # standards: quarter-Kelly already sizes a +1.6% bet at a fraction of a
+  # +6% one, so a lower bar adds small positions rather than bad ones. The
+  # binding problem at this stage is sample size -- closing-line value
+  # needs dozens of settled bets to say anything, and two flags a day
+  # never gets there. Raise it back to 0.02 once CLV has an opinion.
+  min_ev: 0.015
   max_plausible_ev: 0.15       # above this, mark suspect instead of recommending
 
   # How much MORE edge a thin market has to show. The bar becomes
@@ -180,8 +189,18 @@ sports:
 # soft books when a lineup or a park factor changes.
 prop_markets:
   baseball_mlb:
+    # Four markets, not two. Cost is markets x events, so this takes a
+    # full slate from ~30 credits to ~60 -- affordable at roughly seven
+    # prop runs a day, which is more than the productive window needs.
+    #
+    # Widening beats re-scanning: DraftKings is not repricing these every
+    # hour, so a fifth look at the same two markets mostly re-reads the
+    # same numbers, while a new market is a genuinely new set of chances.
+    # All four are primary-tier, so they keep the lower bar.
     - pitcher_strikeouts
     - batter_total_bases
+    - batter_hits
+    - batter_rbis
   americanfootball_nfl:
     - player_pass_yds
     - player_rush_yds

@@ -86,10 +86,27 @@ class TestAssess:
                      fair_prob=0.001, minutes_to_start=60 * 200)
         assert L.MIN_LIQUIDITY <= a.score <= L.MAX_LIQUIDITY
 
-    def test_mainline_outranks_prop_at_identical_prices(self):
+    def test_mainline_outranks_prop_at_each_tier_normal_margin(self):
+        """The comparison that matters: both priced as their kind usually
+        is. Measured off a live board -- mainlines ~2.5%, props ~7.0%."""
+        mainline = L.assess("h2h", 0.025, 2, 0.5, 300)
+        prop = L.assess("pitcher_strikeouts", 0.070, 2, 0.5, 300)
+        assert mainline.score > prop.score
+        assert mainline.score == pytest.approx(1.0, abs=0.02)
+        assert prop.score == pytest.approx(0.75, abs=0.03)
+
+    def test_an_anomalously_wide_mainline_scores_below_a_normal_prop(self):
+        """
+        Deliberate, and the point of judging margin per tier. 4.5% is
+        nearly double what Pinnacle charges on a game line -- it does not
+        want that action -- while the same 4.5% on a prop is tighter than
+        usual, meaning it is confident. The prop is the better reference
+        price, and an absolute overround scale could not see that.
+        """
         args = dict(overround=0.045, n_outcomes=2, fair_prob=0.5,
                     minutes_to_start=300)
-        assert L.assess("h2h", **args).score > L.assess("pitcher_strikeouts", **args).score
+        assert L.assess("pitcher_strikeouts", **args).score > \
+            L.assess("h2h", **args).score
 
 
 class TestSlidingBar:
@@ -131,3 +148,39 @@ class TestDiagnosticBar:
         backwards."""
         for liq in (0.15, 0.5, 1.0):
             assert L.required_ev(-0.03, liq) == pytest.approx(-0.03)
+
+
+class TestTierRelativeOverround:
+    """
+    Margin is judged against normal for the market's kind, not on one
+    absolute scale. Pinnacle charges ~3.5% a side on every MLB prop; that
+    is what the asset class costs, not a signal about any one market.
+    Scoring it against a mainline yardstick penalised props twice -- once
+    via the tier factor, then again for the margin that defines the tier.
+    """
+
+    def test_a_market_at_its_tier_normal_margin_scores_full(self):
+        for tier, baseline in L.TIER_OVERROUND_BASELINE.items():
+            assert L.overround_factor(baseline * 2, 2, tier) == pytest.approx(1.0)
+
+    def test_tighter_than_normal_also_scores_full(self):
+        assert L.overround_factor(0.04, 2, L.TIER_PRIMARY_PROP) == pytest.approx(1.0)
+
+    def test_double_the_normal_margin_bottoms_out(self):
+        base = L.TIER_OVERROUND_BASELINE[L.TIER_PRIMARY_PROP]
+        assert L.overround_factor(base * 4, 2, L.TIER_PRIMARY_PROP) == \
+            pytest.approx(L.OVERROUND_MIN_FACTOR)
+
+    def test_it_decreases_monotonically_within_a_tier(self):
+        scores = [L.overround_factor(o, 2, L.TIER_PRIMARY_PROP)
+                  for o in (0.06, 0.08, 0.10, 0.12, 0.16)]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_the_measured_board_reproduces(self):
+        """Live board, Sep 2026: 15 MLB games, 236 DraftKings quotes."""
+        assert L.assess("h2h", 0.0250, 2, 0.50, 300).score == pytest.approx(1.0, abs=0.02)
+        assert L.assess("pitcher_strikeouts", 0.0703, 2, 0.45, 300).score == \
+            pytest.approx(0.75, abs=0.03)
+
+    def test_an_unknown_tier_falls_back_to_a_prop_baseline(self):
+        assert L.overround_factor(0.070, 2, "not_a_tier") == pytest.approx(1.0)

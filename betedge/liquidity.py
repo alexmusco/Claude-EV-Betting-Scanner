@@ -160,33 +160,63 @@ def tier_for(market_key: str | None) -> str:
 # Component factors
 # --------------------------------------------------------------------------
 
-#: Per-outcome overround at or below which a market is treated as fully
-#: liquid. Pinnacle runs about 1.0-1.2% per side on a major game line.
-OVERROUND_FLOOR = 0.0125
-#: Per-outcome overround at or above which confidence bottoms out. Around
-#: 3.5-4% per side is prop territory with limits in the hundreds.
-OVERROUND_CEILING = 0.040
+#: Normal per-outcome overround for each tier, measured off a live board
+#: (15 MLB games, 236 DraftKings quotes, Sep 2026):
+#:
+#:     mainline      2.27% / 2.50% / 2.86% total  ->  ~1.25% per side
+#:     primary_prop  6.92% / 7.03% / 7.16% total  ->  ~3.52% per side
+#:
+#: The others are interpolated and should be re-measured when there is a
+#: board carrying them. `betedge diagnose` prints these quartiles.
+TIER_OVERROUND_BASELINE = {
+    TIER_MAINLINE: 0.0125,
+    TIER_DERIVATIVE: 0.0200,
+    TIER_PRIMARY_PROP: 0.0350,
+    TIER_SECONDARY_PROP: 0.0420,
+    TIER_ALTERNATE: 0.0500,
+}
+DEFAULT_OVERROUND_BASELINE = 0.0350
+
+#: A market at twice its tier's normal margin bottoms out.
+OVERROUND_WIDE_RATIO = 2.0
 OVERROUND_MIN_FACTOR = 0.45
 
 
-def overround_factor(overround: float, n_outcomes: int = 2) -> float:
+def overround_factor(
+    overround: float, n_outcomes: int = 2, tier: str = TIER_MAINLINE
+) -> float:
     """
-    Confidence from Pinnacle's margin, normalised per outcome.
+    Confidence from Pinnacle's margin, relative to normal FOR THIS TIER.
 
-    Comparing raw overround across market shapes is misleading: a 4.5%
-    total on a three-way soccer market is 1.5% per outcome and perfectly
-    tight, while 4.5% on a two-way prop is 2.25% per side and middling.
-    Dividing by the number of outcomes puts them on one scale.
+    Two normalisations, and the second one was missing for a while.
+
+    Per outcome, because comparing raw overround across market shapes is
+    misleading: 4.5% total on a three-way soccer market is 1.5% per outcome
+    and perfectly tight, while 4.5% on a two-way prop is 2.25% a side and
+    middling.
+
+    Per tier, because an absolute scale double-counts. Pinnacle runs about
+    3.5% a side on every MLB player prop -- that is what the asset class
+    costs, not a signal about any particular market. Judging it against a
+    mainline yardstick scored every prop on the board at 0.41 and set its
+    bar near +3.8%, on top of the 0.75 the tier factor had already applied
+    for exactly the same fact. Props were penalised twice for being props.
+
+    What this measures now is the thing actually worth knowing: is this
+    market unusually wide *for its kind*? A prop at 7% scores 1.0 because
+    that is normal; one at 11% scores low because Pinnacle is telling you
+    it does not want the action.
     """
     if n_outcomes < 1:
         n_outcomes = 1
     per_outcome = max(0.0, overround) / n_outcomes
-    if per_outcome <= OVERROUND_FLOOR:
+    baseline = TIER_OVERROUND_BASELINE.get(tier, DEFAULT_OVERROUND_BASELINE)
+    ratio = per_outcome / baseline
+    if ratio <= 1.0:
         return 1.0
-    if per_outcome >= OVERROUND_CEILING:
+    if ratio >= OVERROUND_WIDE_RATIO:
         return OVERROUND_MIN_FACTOR
-    span = OVERROUND_CEILING - OVERROUND_FLOOR
-    travelled = (per_outcome - OVERROUND_FLOOR) / span
+    travelled = (ratio - 1.0) / (OVERROUND_WIDE_RATIO - 1.0)
     return 1.0 - travelled * (1.0 - OVERROUND_MIN_FACTOR)
 
 
@@ -275,7 +305,7 @@ def assess(
     drag the result down rather than be averaged away by the others.
     """
     tier = tier_for(market)
-    o = overround_factor(overround, n_outcomes)
+    o = overround_factor(overround, n_outcomes, tier)
     t = timing_factor(minutes_to_start)
     l = longshot_factor(fair_prob)
     raw = TIER_CONFIDENCE.get(tier, 0.55) * o * t * l

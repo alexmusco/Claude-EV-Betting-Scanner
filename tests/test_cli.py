@@ -312,3 +312,97 @@ class TestShow:
         cfg_path, _client, _ = wired
         assert run(["--config", str(cfg_path), "show"]) == 1
         assert "betedge daily" in capsys.readouterr().out
+
+
+class TestMarketIsAlwaysShown:
+    def test_show_names_the_stat(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        # The fixture's prop carries an implausible edge and is flagged
+        # suspect, so it is behind --include-suspect. The stat has to be
+        # named there too -- suspect rows are the ones you look at hardest.
+        run(["--config", str(cfg_path), "show", "--include-suspect"])
+        assert "Pitcher Ks" in capsys.readouterr().out
+
+    def test_the_bet_confirmation_names_the_stat(self, wired, capsys, tmp_path):
+        """The worst place to omit it: the line confirming what you logged."""
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        db = Database(tmp_path / "t.db")
+        opp = db.conn.execute(
+            "SELECT id FROM opportunities WHERE market='pitcher_strikeouts' "
+            "AND suspect=0 LIMIT 1"
+        ).fetchone()
+        db.close()
+        if opp is None:
+            pytest.skip("no prop opportunity in this fixture run")
+        run(["--config", str(cfg_path), "bet", str(opp["id"]), "--stake", "20"])
+        assert "Pitcher Ks" in capsys.readouterr().out
+
+    def test_diagnose_names_the_stat(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "diagnose"])
+        assert "Pitcher Ks" in capsys.readouterr().out
+
+
+class TestAmericanPrices:
+    def test_show_displays_american(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "show"])
+        out = capsys.readouterr().out
+        assert "+110" in out, "2.10 should read as +110"
+
+    def test_a_bet_can_be_logged_at_an_american_price(self, wired, capsys, tmp_path):
+        """`--price -110` used to be read as a decimal price of -110."""
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        db = Database(tmp_path / "t.db")
+        opp = db.conn.execute(
+            "SELECT id FROM opportunities WHERE suspect=0 LIMIT 1"
+        ).fetchone()
+        db.close()
+        assert run(["--config", str(cfg_path), "bet", str(opp["id"]),
+                    "--stake", "15", "--price", "+122"]) == 0
+        assert "+122" in capsys.readouterr().out
+
+        db = Database(tmp_path / "t.db")
+        stored = db.conn.execute("SELECT price FROM bets").fetchone()["price"]
+        db.close()
+        assert stored == pytest.approx(2.22), "stored as decimal for the maths"
+
+    def test_a_negative_american_price_is_not_read_as_decimal(self, wired, tmp_path, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        db = Database(tmp_path / "t.db")
+        opp = db.conn.execute(
+            "SELECT id FROM opportunities WHERE suspect=0 LIMIT 1"
+        ).fetchone()
+        db.close()
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "bet", str(opp["id"]),
+             "--stake", "10", "--price", "-110"])
+        db = Database(tmp_path / "t.db")
+        stored = db.conn.execute("SELECT price FROM bets").fetchone()["price"]
+        db.close()
+        assert stored == pytest.approx(1.909, abs=1e-3)
+
+    def test_decimal_input_still_works(self, wired, tmp_path, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        db = Database(tmp_path / "t.db")
+        opp = db.conn.execute(
+            "SELECT id FROM opportunities WHERE suspect=0 LIMIT 1"
+        ).fetchone()
+        db.close()
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "bet", str(opp["id"]),
+             "--stake", "10", "--price", "2.05"])
+        db = Database(tmp_path / "t.db")
+        stored = db.conn.execute("SELECT price FROM bets").fetchone()["price"]
+        db.close()
+        assert stored == pytest.approx(2.05)

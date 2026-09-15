@@ -59,10 +59,16 @@ The id column is what `betedge bet <id> --stake <amount>` takes.
 Then log what you actually got down:
 
 ```bash
-bet bet 1 --stake 25            # the id from the list
-bet bet 1 --stake 25 --price 2.05   # if the price moved before you clicked
-bet settle 1 won                # won | lost | push | void | half_won | half_lost
+bet bet 1 --stake 25              # the id from the list
+bet bet 1 --stake 25 --price -110 # if the price moved before you clicked
+bet settle 1 won                  # won | lost | push | void | half_won | half_lost
 ```
+
+Prices are shown and accepted in American, because that is what
+DraftKings puts on the screen. `--price` takes either format — anything
+negative or at/beyond ±100 is read as American, anything between 1 and 100
+as decimal, and the two ranges do not overlap for any realistic price.
+Decimal is what gets stored, because that is what the maths uses.
 
 And periodically:
 
@@ -156,7 +162,7 @@ The API does not publish limits. Three observable proxies stand in:
 
 | Signal | Why it works |
 |---|---|
-| **Pinnacle's own margin**, per outcome | Pinnacle sets margin inversely to limit as policy: ~2% on a game side it takes five figures on, 5–7% on a prop it takes a few hundred. A tight margin is Pinnacle telling you it is confident. |
+| **Pinnacle's own margin**, per outcome *and per tier* | Pinnacle sets margin inversely to limit as policy. But the comparison has to be against normal **for that kind of market**: it charges ~1.25% a side on a game line and ~3.5% on an MLB prop, so an absolute scale marks every prop as thin for a reason that is simply what props cost. What matters is whether this market is unusually wide *for its kind*. |
 | **Market tier** | Game sides and totals are where sharp money concentrates. Primary props are heavily bet but an order of magnitude thinner. Alternate lines are thinner again. |
 | **Time to start** | Limits rise and prices converge as an event approaches. A prop posted Tuesday for a Sunday game is a placeholder. |
 
@@ -168,7 +174,7 @@ similar yes/no longshots live here.
 These combine into a 0–1 score used two ways:
 
 - **A sliding EV bar.** Game lines flag at **+2%**, primary props at about
-  **+3%**, alternate lines at about **+4.5%**. This is the Bayesian-correct
+  **+2.8%**, alternate lines higher still. This is the Bayesian-correct
   response to a noisier estimate, not timidity: if your fair probability
   could be off by two points, a two-point edge is not an edge.
 
@@ -390,6 +396,22 @@ scan engine rather than by omission from the sport lists:
 excluded_sports:
   - "*ncaa*"
 ```
+
+### Calibrating the liquidity model
+
+`betedge diagnose` prints Pinnacle's overround quartiles by tier. Those are
+what `TIER_OVERROUND_BASELINE` in `liquidity.py` should match. The shipped
+values were measured off a live board in September 2026 — 15 MLB games, 236
+DraftKings quotes:
+
+| Tier | Total overround (25th / median / 75th) | Per outcome |
+|---|---|---|
+| mainline | 2.27% / 2.50% / 2.86% | ~1.25% |
+| primary_prop | 6.92% / 7.03% / 7.16% | ~3.52% |
+
+Re-measure when a season changes or a new sport comes on the board. If your
+`diagnose` output disagrees materially with the table above, the baselines
+are stale and every liquidity score built on them is off.
 
 That placement is the point. Leaving college out of `core_sports` would be
 undone by `--core-sports americanfootball_*`, or by `--sports

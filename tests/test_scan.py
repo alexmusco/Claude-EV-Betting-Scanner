@@ -216,7 +216,7 @@ class TestLiquidityBar:
 
     def test_ranking_prefers_a_deep_market_over_a_bigger_thin_edge(self, cfg, now):
         """
-        A +4.7% strikeout prop (liquidity 0.58) against a +3.0% NFL side
+        A +3.6% strikeout prop (liquidity 0.75) against a +3.0% NFL side
         (liquidity 0.99). Both clear their bars, so both are real
         candidates; the question is only which one the list opens with.
         Discounted, the prop is worth 0.027 and the side 0.030, so the side
@@ -227,7 +227,7 @@ class TestLiquidityBar:
             bulk_odds={"americanfootball_nfl": [nfl_game(dk_home_price=2.06)]},
             events_by_sport={"baseball_mlb": [
                 {"id": "mlb1", "commence_time": (NOW + timedelta(hours=6)).isoformat()}]},
-            event_odds={("baseball_mlb", "mlb1"): mlb_prop(dk_over=2.05)},
+            event_odds={("baseball_mlb", "mlb1"): mlb_prop(dk_over=2.03)},
         )
         cfg.core_sports = ["americanfootball_nfl"]
         cfg.sports = ["baseball_mlb"]
@@ -490,3 +490,62 @@ class TestRejectionLabels:
         meta, quotes = S.parse_event_odds(mlb_prop(dk_over=2.00))
         opps = S.evaluate_event(meta, quotes, cfg, now=now)
         assert opps and opps[0].ev > 0
+
+
+class TestBetRendering:
+    """
+    A bet needs who, what stat, and what number. Dropping any one produces
+    a string that reads fine and cannot be placed -- "Max Fried Under 4.5"
+    is strikeouts, hits allowed or outs, and with four MLB prop markets
+    configured that ambiguity is not hypothetical.
+    """
+
+    def test_a_prop_names_its_stat(self):
+        assert S._render_bet("Max Fried", "Under", 4.5, "pitcher_strikeouts") == \
+            "Max Fried Under 4.5 (Pitcher Ks)"
+
+    def test_props_on_the_same_line_are_distinguishable(self):
+        """The failure in full: same player, same side, same number."""
+        a = S._render_bet("Jo Adell", "Under", 0.5, "batter_rbis")
+        b = S._render_bet("Jo Adell", "Under", 0.5, "batter_hits")
+        assert a != b
+        assert "RBIs" in a and "Hits" in b
+
+    def test_a_moneyline_does_not_repeat_itself(self):
+        assert S._render_bet("Chiefs", "Chiefs", None, "h2h") == "Chiefs ML"
+
+    def test_a_spread_keeps_its_handicap_and_adds_no_label(self):
+        assert S._render_bet("Brewers", "Brewers", -1.5, "spreads") == "Brewers -1.5"
+
+    def test_a_game_total_is_not_labelled_twice(self):
+        assert S._render_bet("Over", "Over", 8.5, "totals") == "Total Over 8.5"
+
+    def test_an_unknown_market_still_gets_a_readable_label(self):
+        out = S._render_bet("Someone", "Over", 1.5, "player_brand_new_stat")
+        assert "Someone Over 1.5" in out and "(" in out
+
+    def test_the_line_survives_a_zero(self):
+        assert "0.5" in S._render_bet("X", "Over", 0.5, "batter_rbis")
+
+    def test_opportunity_description_uses_the_same_renderer(self, cfg, now):
+        meta, quotes = S.parse_event_odds(mlb_prop(dk_over=2.30))
+        o = S.evaluate_event(meta, quotes, cfg, now=now)[0]
+        assert o.description == S._render_bet(
+            o.selection, o.side, o.line, o.market
+        )
+        assert "Pitcher Ks" in o.description
+
+    def test_the_diagnostic_view_matches_the_betting_view(self, cfg, now):
+        """These drifted apart once already; that drift lost the market."""
+        client = FakeClient(
+            events_by_sport={"baseball_mlb": [
+                {"id": "mlb1",
+                 "commence_time": (NOW + timedelta(hours=6)).isoformat()}]},
+            event_odds={("baseball_mlb", "mlb1"): mlb_prop(dk_over=2.30)},
+        )
+        cfg.sports = ["baseball_mlb"]
+        cfg.prop_markets = {"baseball_mlb": ["pitcher_strikeouts"]}
+        result = scan(cfg, client, now=now, collect=True)
+        flagged = {o.description for o in result.opportunities}
+        priced = {a.description for a in result.assessments}
+        assert flagged <= priced

@@ -93,6 +93,14 @@ class TestModel:
     def test_the_ev_bar_is_plausible(self, cfg):
         assert 0.0 < cfg.model.min_ev < cfg.model.max_plausible_ev
 
+    def test_the_bar_is_not_so_low_it_is_inside_the_estimate_error(self, cfg):
+        """
+        Below about 1%, the edge being claimed is smaller than the error on
+        a fair probability de-vigged from a 7%-margin prop market. That is
+        not a bet, it is a rounding difference.
+        """
+        assert cfg.model.min_ev >= 0.01
+
     def test_the_overround_band_is_ordered(self, cfg):
         assert 0 < cfg.model.min_overround < cfg.model.max_overround
 
@@ -113,6 +121,31 @@ class TestBankroll:
 
 
 class TestPropCost:
+    def test_the_prop_market_list_is_wide_enough_to_produce_candidates(self, cfg):
+        """
+        Two markets on a 15-game slate yields a handful of quotes a day,
+        which never accumulates the sample closing-line value needs.
+        Widening beats re-scanning: DraftKings is not repricing hourly.
+        """
+        assert len(cfg.prop_markets.get("baseball_mlb", [])) >= 4
+
+    def test_mlb_prop_markets_are_all_primary_tier(self, cfg):
+        """Secondary-tier markets carry a materially higher bar, so paying
+        per-event for them buys candidates that mostly cannot clear."""
+        from betedge.liquidity import TIER_PRIMARY_PROP, tier_for
+
+        for market in cfg.prop_markets.get("baseball_mlb", []):
+            assert tier_for(market) == TIER_PRIMARY_PROP, market
+
+    def test_a_full_prop_run_fits_the_daily_allowance(self, cfg):
+        """15 events x markets, plus an hourly core sweep, against the pace
+        a 20,000-credit month allows."""
+        markets = len(cfg.prop_markets.get("baseball_mlb", []))
+        per_prop_run = 15 * markets
+        daily_pace = (cfg.budget.monthly_credits - cfg.budget.reserve) / 30
+        core_all_day = 24 * 10
+        assert per_prop_run * 5 + core_all_day <= daily_pace
+
     def test_every_prop_sport_has_a_narrowed_market_list(self, cfg):
         """Cost is markets x events, so an unnarrowed sport is the single
         easiest way to blow the month."""
