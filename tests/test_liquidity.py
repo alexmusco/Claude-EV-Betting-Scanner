@@ -118,3 +118,16 @@ class TestEdgeScore:
         mainline = L.edge_score(0.03, 1.00)
         alt_prop = L.edge_score(0.05, 0.35)
         assert mainline > alt_prop
+
+
+class TestDiagnosticBar:
+    def test_a_zero_bar_stays_zero_at_every_liquidity(self):
+        for liq in (0.15, 0.5, 1.0):
+            assert L.required_ev(0.0, liq) == 0.0
+
+    def test_a_negative_bar_is_not_scaled(self):
+        """`--min-ev -0.03` means "show me everything down to -3%". Scaling
+        would make thin markets easier to surface than deep ones, which is
+        backwards."""
+        for liq in (0.15, 0.5, 1.0):
+            assert L.required_ev(-0.03, liq) == pytest.approx(-0.03)

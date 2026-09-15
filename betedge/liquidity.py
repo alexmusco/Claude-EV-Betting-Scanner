@@ -298,6 +298,11 @@ def required_ev(base_min_ev: float, liquidity: float, penalty: float = 1.5) -> f
     `model.liquidity_ev_penalty` to 0 to switch this off and go back to one
     flat bar for everything.
     """
+    if base_min_ev <= 0:
+        # A zero or negative bar is a diagnostic sweep -- "show me everything
+        # down to -3%". Scaling it by the penalty would invert the intent,
+        # making thin markets EASIER to surface than deep ones.
+        return base_min_ev
     liquidity = min(max(liquidity, 0.0), 1.0)
     return base_min_ev * (1.0 + penalty * (1.0 - liquidity))
 

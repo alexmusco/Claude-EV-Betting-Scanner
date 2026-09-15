@@ -830,3 +830,86 @@ and are configuration, not fact &mdash; verify them against your account with
 <code>betedge parlay verify-payouts</code> before acting on any number here.</p>
 {rejected}
 </div>"""
+# --------------------------------------------------------------------------
+# Diagnostics
+# --------------------------------------------------------------------------
+
+
+def _percentile(values: Sequence[float], q: float) -> float:
+    if not values:
+        return float("nan")
+    s = sorted(values)
+    idx = min(len(s) - 1, max(0, int(round(q * (len(s) - 1)))))
+    return s[idx]
+
+
+def distribution_report(assessments: Sequence, min_ev: float, top: int = 15) -> str:
+    """
+    What the whole board looked like, not just what cleared the bar.
+
+    A scan that flags nothing tells you a bar was not met; it does not tell
+    you by how much. Whether the best quote on the board sat at -0.3% or at
+    -6% is the difference between a threshold set slightly too high and a
+    market with no edge in it at all, and those call for opposite responses.
+    """
+    if not assessments:
+        return ("Nothing was priced. Either no event was in window, or the "
+                "sharp book had no complete two-sided market to compare.")
+
+    evs = [a.ev for a in assessments]
+    out: list[str] = []
+    books = sorted({a.book for a in assessments})
+    out.append(f"{len(assessments):,} soft-book quotes priced "
+               f"({', '.join(books)}) against the de-vigged sharp price.")
+    out.append("")
+
+    # ---- EV distribution ------------------------------------------------
+    out.append("EXPECTED VALUE ACROSS THE BOARD")
+    for label, q in [("worst", 0.0), ("25th", 0.25), ("median", 0.5),
+                     ("75th", 0.75), ("90th", 0.90), ("best", 1.0)]:
+        out.append(f"  {label:<8} {_percentile(evs, q):+7.2%}")
+    positive = [e for e in evs if e > 0]
+    out.append(f"  {len(positive):,} of {len(evs):,} priced above zero "
+               f"({len(positive)/len(evs):.0%})")
+    out.append("")
+
+    # ---- where the bar sits --------------------------------------------
+    out.append("WHAT DIFFERENT BARS WOULD HAVE FLAGGED")
+    for bar in (0.04, 0.03, 0.02, 0.01, 0.005, 0.0):
+        n = sum(1 for a in assessments if a.ev >= bar)
+        marker = "  <- your min_ev" if abs(bar - min_ev) < 1e-9 else ""
+        out.append(f"  at {bar:+.1%}: {n:3d} quote(s){marker}")
+    cleared = sum(1 for a in assessments if a.ev >= a.required_ev)
+    out.append(f"  after the liquidity adjustment: {cleared} flagged")
+    out.append("")
+
+    # ---- sharp book margin, the liquidity input ------------------------
+    out.append("PINNACLE OVERROUND BY MARKET TIER  (the liquidity signal)")
+    by_tier: dict[str, list] = {}
+    for a in assessments:
+        by_tier.setdefault(a.tier, []).append(a)
+    for tier, rows in sorted(by_tier.items(), key=lambda kv: -len(kv[1])):
+        orr = [r.overround for r in rows]
+        liq = [r.liquidity for r in rows]
+        out.append(
+            f"  {tier:<16} n={len(rows):<4} overround "
+            f"{_percentile(orr, 0.25):.2%} / {_percentile(orr, 0.5):.2%} / "
+            f"{_percentile(orr, 0.75):.2%}   liquidity median "
+            f"{_percentile(liq, 0.5):.2f}"
+        )
+    out.append("  (quartiles: 25th / median / 75th)")
+    out.append("")
+
+    # ---- the near misses ------------------------------------------------
+    out.append(f"CLOSEST {top} TO CLEARING, BEST FIRST")
+    header = (f"  {'EV':>7} {'bar':>7} {'short':>7}  {'liq':>5} {'orr':>6}  "
+              f"{'bet':<34} {'price':>6}  game")
+    out.append(header)
+    out.append("  " + "-" * (len(header) - 2))
+    for a in sorted(assessments, key=lambda x: x.shortfall)[:top]:
+        out.append(
+            f"  {a.ev:>+6.2%} {a.required_ev:>+6.2%} {a.shortfall:>+6.2%}  "
+            f"{a.liquidity:>5.2f} {a.overround:>5.2%}  "
+            f"{a.description:<34.34} {a.soft_price:>6.2f}  {a.matchup[:30]}"
+        )
+    return "\n".join(out)

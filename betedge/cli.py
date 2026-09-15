@@ -4,6 +4,7 @@ Command line interface.
     betedge daily                         the one you want: budgeted scan + shortlist
     betedge profiles                      named override bundles, e.g. nfl-week
     betedge budget                        credits left, and today's allowance
+    betedge diagnose                      what the whole board looks like
     betedge sports                        list live sport keys and prop coverage
     betedge quota                         check credits (free)
     betedge scan                          run a scan and write a report
@@ -403,6 +404,47 @@ def cmd_daily(cfg: Config, args) -> int:
     after = current_budget(cfg, db, client)
     print(f"\n{after.remaining:,} credits left this cycle "
           f"({after.days_left:.1f} days to go).")
+    db.close()
+    return 0
+
+
+def cmd_diagnose(cfg: Config, args) -> int:
+    """
+    Price the board and report the distribution, not just what cleared.
+
+    The question this answers is the one a scan flagging nothing cannot: is
+    the bar slightly too high, or is there no edge here at all? Those look
+    identical in the rejection counters and call for opposite responses.
+
+    Costs exactly what a scan costs -- it is a scan, with everything kept
+    rather than only the winners.
+    """
+    if args.sports:
+        cfg.sports = args.sports
+    if args.no_props:
+        cfg.sports = []
+
+    db = Database(cfg.database)
+    client = build_client(cfg)
+    try:
+        client.probe_quota()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: cannot reach the API: {exc}", file=sys.stderr)
+        db.close()
+        return 1
+
+    status = current_budget(cfg, db, client)
+    if cfg.budget.enabled:
+        client.max_credits_per_scan = (
+            client.quota.spent_this_session + status.spendable
+        )
+
+    result = scan(cfg, client, max_events_per_sport=args.max_events, collect=True)
+    _log_spend(db, client, "diagnose", ",".join(result.sports)[:200])
+
+    print(R.scan_summary(result))
+    print()
+    print(R.distribution_report(result.assessments, cfg.model.min_ev, top=args.top))
     db.close()
     return 0
 
@@ -1225,6 +1267,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="named bundles of config overrides, and what each one changes",
     )
     s.set_defaults(func=cmd_profiles)
+
+    s = sub.add_parser(
+        "diagnose",
+        help="price the whole board and show the distribution, not just hits",
+    )
+    s.add_argument("--top", type=int, default=15,
+                   help="how many near-misses to list")
+    s.add_argument("--sports", nargs="+", help="override configured prop sports")
+    s.add_argument("--no-props", action="store_true",
+                   help="game lines only, the cheap pass")
+    s.add_argument("--max-events", type=int)
+    s.set_defaults(func=cmd_diagnose)
 
     s = sub.add_parser("budget", help="credits left and today's allowance")
     s.add_argument("--days", type=int, default=14,

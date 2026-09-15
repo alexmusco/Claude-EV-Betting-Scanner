@@ -450,3 +450,43 @@ class TestExcludedSports:
         cfg.core_sports = ["americanfootball_ncaaf"]
         scan(cfg, client, now=now)
         assert client.calls["odds"] == 1
+
+
+class TestRejectionLabels:
+    """The counters are the only window into a scan that flags nothing, so
+    they have to name the cause rather than the circumstance."""
+
+    def test_liquidity_bar_is_credited_only_when_it_is_the_cause(self, cfg, now):
+        # +2.1% on a ~4.8% prop market: clears a flat 2% bar, fails the
+        # liquidity-adjusted one. This is the penalty doing the rejecting.
+        meta, quotes = S.parse_event_odds(mlb_prop(dk_over=2.00))
+        rej = {}
+        assert S.evaluate_event(meta, quotes, cfg, now=now, rejections=rej) == []
+        # The Over clears a flat 2% bar but not the adjusted one, so the
+        # penalty is what rejected it. (The fixture's Under side is deeply
+        # negative and lands in below_min_ev, as it should.)
+        assert rej.get("below_liquidity_bar") == 1
+
+    def test_a_thin_market_with_no_edge_is_not_credited_to_the_bar(self, cfg, now):
+        """Was mislabelled: anything in a thin market counted against the
+        liquidity bar however far below it sat, making the counter useless
+        for judging whether the penalty is set right."""
+        meta, quotes = S.parse_event_odds(mlb_prop(dk_over=1.80))
+        rej = {}
+        assert S.evaluate_event(meta, quotes, cfg, now=now, rejections=rej) == []
+        assert rej.get("below_min_ev") == 2, "both sides, neither close"
+        assert "below_liquidity_bar" not in rej
+
+    def test_a_deep_market_with_no_edge_is_below_min_ev(self, cfg, now):
+        meta, quotes = S.parse_event_odds(nfl_game(dk_home_price=1.90))
+        rej = {}
+        assert S.evaluate_event(meta, quotes, cfg, now=now, rejections=rej) == []
+        assert rej.get("below_min_ev")
+
+    def test_a_diagnostic_sweep_surfaces_near_misses(self, cfg, now):
+        """`--min-ev 0` has to show the thin-market near-misses too, which
+        a scaled bar would have hidden."""
+        cfg.model.min_ev = 0.0
+        meta, quotes = S.parse_event_odds(mlb_prop(dk_over=2.00))
+        opps = S.evaluate_event(meta, quotes, cfg, now=now)
+        assert opps and opps[0].ev > 0
