@@ -406,3 +406,84 @@ class TestAmericanPrices:
         stored = db.conn.execute("SELECT price FROM bets").fetchone()["price"]
         db.close()
         assert stored == pytest.approx(2.05)
+
+
+class TestCompareCommand:
+    def seed(self, tmp_path):
+        from betedge.db import Database
+
+        db = Database(tmp_path / "t.db")
+        for i in range(14):
+            bid = db.place_bet(stake=50, price=1.91, book="draftkings",
+                               ev_at_bet=0.03)
+            db.settle_bet(bid, "won" if i % 2 == 0 else "lost")
+            db.record_closing_line(
+                opportunity_id=None, bet_id=bid, sharp_price_taken=1.9,
+                sharp_price_other=1.9, fair_prob_close=0.54, price_taken=1.91,
+            )
+        db.conn.execute(
+            """INSERT INTO parlay_tickets (created_at, product, book, kind,
+                   n_legs, joint_prob, ev, payout_all_hit)
+               VALUES ('2026-09-15T00:00:00+00:00','underdog_standard',
+                       'underdog','pickem',2,0.36,0.08,3.0)"""
+        )
+        db.conn.commit()
+        for i in range(14):
+            pb = db.place_parlay_bet(1, stake=20)
+            db.settle_parlay_bet(pb, legs_hit=2 if i % 3 == 0 else 1)
+        db.close()
+
+    def test_it_puts_both_strategies_on_the_same_metrics(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        assert cli.main(["--config", str(cfg_path), "compare"]) == 0
+        out = capsys.readouterr().out
+        assert "Strategy comparison" in out
+        assert "single bets" in out and "multi-leg" in out
+        for row in ("ROI", "settled bets", "avg closing-line value",
+                    "realised / modelled"):
+            assert row in out
+
+    def test_it_shows_an_interval_not_just_a_point(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        cli.main(["--config", str(cfg_path), "compare"])
+        out = capsys.readouterr().out
+        assert "ROI 90% interval" in out
+        assert " to " in out
+
+    def test_it_says_how_many_bets_a_verdict_would_need(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        cli.main(["--config", str(cfg_path), "compare"])
+        assert "bets needed for +/-5% ROI" in capsys.readouterr().out
+
+    def test_it_declines_to_call_a_small_sample(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        cli.main(["--config", str(cfg_path), "compare"])
+        # Whitespace collapsed first: the verdict is wrapped to the
+        # terminal, so any phrase long enough to be worth asserting on is
+        # long enough to be split across two lines.
+        out = " ".join(capsys.readouterr().out.split())
+        assert "not evidence of anything yet" in out or "Too few" in out
+
+    def test_an_empty_log_does_not_crash(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        assert cli.main(["--config", str(cfg_path), "compare"]) == 0
+        assert "Nothing settled yet" in capsys.readouterr().out
+
+    def test_it_costs_nothing(self, wired):
+        cfg_path, client, tmp_path = wired
+        self.seed(tmp_path)
+        cli.main(["--config", str(cfg_path), "compare"])
+        assert client.quota.spent_this_session == 0
+
+    def test_the_html_report_carries_the_comparison(self, wired, tmp_path):
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        cli.main(["--config", str(cfg_path), "report"])
+        html = (tmp_path / "reports" / "performance.html").read_text()
+        assert "Which strategy is working" in html
+        assert "ROI 90% interval" in html
+        assert "Realised / modelled" in html

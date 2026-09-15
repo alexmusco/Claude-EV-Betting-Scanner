@@ -13,6 +13,7 @@ Command line interface.
     betedge settle <bet_id> won           settle it
     betedge close                         capture closing lines for open bets
     betedge report                        performance report
+    betedge compare                       single bets vs multi-leg, side by side
     betedge export <file.csv>             dump bets to CSV
 
     betedge parlay scan                   build and rank multi-leg tickets
@@ -657,6 +658,81 @@ def cmd_report(cfg: Config, args) -> int:
         Path(cfg.reports_dir) / "performance.html", R.performance_report_html(db, cfg)
     )
     print(f"\nReport: {path}")
+    db.close()
+    return 0
+
+
+def cmd_compare(cfg: Config, args) -> int:
+    """
+    Which strategy is actually making money -- and whether the sample can
+    yet support an answer.
+    """
+    db = Database(cfg.database)
+    comparison = db.compare_strategies()
+    strategies = comparison.strategies
+
+    def cell(value, kind="pct") -> str:
+        if value is None:
+            return "-"
+        if kind == "pct":
+            return f"{value:+.2%}"
+        if kind == "pct0":
+            return f"{value:.0%}"
+        if kind == "money":
+            return f"{value:+,.2f}"
+        if kind == "ratio":
+            return f"x{value:,.2f}"
+        if kind == "int":
+            return f"{value:,}"
+        return f"{value:,.2f}"
+
+    rows = [
+        ("settled bets", [cell(s.settled, "int") for s in strategies]),
+        ("pending", [cell(s.pending, "int") for s in strategies]),
+        ("staked", [f"{s.staked:,.0f}" for s in strategies]),
+        ("profit and loss", [cell(s.pnl, "money") for s in strategies]),
+        ("ROI", [cell(s.roi) for s in strategies]),
+        (
+            f"ROI {comparison.confidence:.0%} interval",
+            [
+                "-" if s.roi_interval() is None
+                else f"{s.roi_interval()[0]:+.1%} to {s.roi_interval()[1]:+.1%}"
+                for s in strategies
+            ],
+        ),
+        ("modelled P&L", [cell(s.modelled_pnl, "money") for s in strategies]),
+        ("realised / modelled", [cell(s.realisation, "ratio") for s in strategies]),
+        ("avg closing-line value", [cell(s.avg_clv) for s in strategies]),
+        ("CLV beat rate", [cell(s.clv_beat_rate, "pct0") for s in strategies]),
+        ("CLV sample", [cell(len(s.clv_values), "int") for s in strategies]),
+        (
+            "bets needed for +/-5% ROI",
+            [cell(s.bets_needed(), "int") for s in strategies],
+        ),
+    ]
+
+    width = max(len(label) for label, _ in rows) + 2
+    header = " " * width + "".join(f"{s.name:>20}" for s in strategies)
+    print("Strategy comparison")
+    print(header)
+    print("-" * len(header))
+    for label, values in rows:
+        print(f"{label:<{width}}" + "".join(f"{v:>20}" for v in values))
+
+    print()
+    for line in _wrap(comparison.verdict(), 76):
+        print(line)
+
+    print()
+    for line in _wrap(
+        "Read the last two blocks before the first. Closing-line value "
+        "converges in dozens of bets where profit needs thousands, and "
+        "'realised over modelled' asks the question underneath the "
+        "question: not which strategy won more, but whose claimed edge "
+        "showed up.",
+        76,
+    ):
+        print(line)
     db.close()
     return 0
 
@@ -1514,6 +1590,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--void", type=int, default=0, metavar="N",
                    help="legs that pushed and shrank the entry")
     s.set_defaults(func=cmd_parlay_settle)
+
+    s = sub.add_parser(
+        "compare",
+        help="single bets against multi-leg tickets, on the same metrics",
+    )
+    s.set_defaults(func=cmd_compare)
 
     s = sub.add_parser("report", help="performance and closing-line value")
     s.set_defaults(func=cmd_report)

@@ -464,6 +464,52 @@ the t-stat.
 
 ---
 
+## Which strategy is working
+
+The two strategies are tracked in separate tables and always have been —
+single bets in `bets`, multi-leg entries in `parlay_bets` — so nothing is
+pooled. `betedge compare` puts them on identical metrics:
+
+```
+                                    single bets           multi-leg
+settled bets                                 60                  28
+staked                                    3,000                 560
+profit and loss                         +533.50              -20.00
+ROI                                     +17.78%              -3.57%
+ROI 90% interval                -1.3% to +36.9%    -46.4% to +39.3%
+modelled P&L                             +90.00              +44.80
+realised / modelled                       x5.93              x-0.45
+avg closing-line value                   +3.14%                   -
+bets needed for +/-5% ROI                 1,348               3,129
+```
+
+**The interval row is the point.** A +17.8% against −3.6% looks decisive
+and is not: those intervals overlap heavily, so the sample is entirely
+consistent with the two performing identically. The tool says so rather
+than letting the ROI column be read as a verdict.
+
+Why ROI is nearly useless here: a single bet at even money returns ±1 per
+unit staked, so the error on measured ROI after *n* bets is about
+`1/sqrt(n)` — forty bets gives you ±16 points against a real edge of two
+or three. Multi-leg entries are far worse, because a lumpy payoff is the
+whole idea: a 20x ticket landing 5% of the time has a per-bet standard
+deviation near 4.4, so a hundred settled entries still leaves ±40 points.
+You could run a genuinely +5% strategy and a genuinely −5% one side by
+side for a season and measure them the wrong way round.
+
+So the interval is bootstrapped by resampling the actual settled bets,
+which respects the real shape of the payoffs instead of assuming a normal
+one — and the last row states, from each strategy's own observed spread,
+how many settled bets it would take before profit could resolve a
+five-point difference at all.
+
+**Read the bottom rows first.** Closing-line value converges in dozens of
+bets where profit needs thousands, and *realised over modelled* asks the
+question underneath the question: not which strategy won more, but whose
+claimed edge actually showed up. It tends to 1.0 if the model is right.
+
+---
+
 ## Why closing-line value is the number to watch
 
 Profit and loss over 50 bets tells you almost nothing. At a 3% edge with
@@ -818,6 +864,7 @@ betedge/
   parlay.py     pick'em and parlay tickets: legs, guards, search, staking
   liquidity.py  how far to trust a fair price, and what edge to demand
   budget.py     monthly credit pacing
+  performance.py comparing the two strategies, and when not to
   markets.py    sport and market registry, credit cost rules
   oddsapi.py    API client, quota tracking, caching, retries
   scan.py       parse → group → score → guard; core markets then props
@@ -829,7 +876,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          696 tests; no network, no credits spent
+tests/          792 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 

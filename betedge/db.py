@@ -1109,6 +1109,62 @@ class Database:
             "clv_sample": len(clv),
         }
 
+    def compare_strategies(self):
+        """
+        The two strategies side by side on identical metrics.
+
+        Single bets and multi-leg entries have always been tracked in
+        separate tables, which is what makes this possible at all --  but
+        their summaries grew different field names, so nothing could read
+        them together. This puts both through one shape.
+
+        Void bets are excluded from both: a returned stake is not a result
+        either way, and counting them would dilute every rate with
+        outcomes that never happened.
+        """
+        from . import performance
+
+        singles = self.conn.execute(
+            "SELECT stake, pnl, ev_at_bet FROM bets "
+            "WHERE status NOT IN ('pending','void')"
+        ).fetchall()
+        single_pending = self.conn.execute(
+            "SELECT id FROM bets WHERE status='pending'"
+        ).fetchall()
+        single_clv = [
+            r["clv_ev"] for r in self.conn.execute(
+                "SELECT clv_ev FROM closing_lines "
+                "WHERE clv_ev IS NOT NULL AND bet_id IS NOT NULL"
+            ).fetchall()
+        ]
+
+        parlays = self.conn.execute(
+            "SELECT stake, pnl, ev_at_bet FROM parlay_bets "
+            "WHERE status NOT IN ('pending','void')"
+        ).fetchall()
+        parlay_pending = self.conn.execute(
+            "SELECT id FROM parlay_bets WHERE status='pending'"
+        ).fetchall()
+        # Only tickets actually entered. Closing lines are captured for
+        # tickets that were never bet too -- that is the model-quality
+        # signal, and belongs in the parlay report rather than in a
+        # comparison of what the two strategies EARNED.
+        parlay_clv = [
+            r["clv_ev"] for r in self.conn.execute(
+                "SELECT clv_ev FROM parlay_closing_lines "
+                "WHERE clv_ev IS NOT NULL AND parlay_bet_id IS NOT NULL"
+            ).fetchall()
+        ]
+
+        return performance.Comparison([
+            performance.summarise(
+                "single bets", singles, single_pending, single_clv
+            ),
+            performance.summarise(
+                "multi-leg", parlays, parlay_pending, parlay_clv
+            ),
+        ])
+
     def breakdown(self, column: str) -> list[dict[str, Any]]:
         """Settled performance grouped by any bet column (sport, market, book)."""
         allowed = {"sport", "market", "book", "side", "selection"}

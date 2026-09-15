@@ -391,6 +391,69 @@ def performance_report_html(db: Database, cfg: Config) -> str:
     else:
         parlay_html = ""
 
+    # The two strategies side by side, on identical metrics. Placed above
+    # the per-strategy detail because "which of these is working" is the
+    # question the whole log exists to answer.
+    comparison = db.compare_strategies()
+    comp_rows = []
+    for label, getter, kind in [
+        ("Settled bets", lambda x: x.settled, "int"),
+        ("Staked", lambda x: x.staked, "plain"),
+        ("P&amp;L", lambda x: x.pnl, "money"),
+        ("ROI", lambda x: x.roi, "pct"),
+        ("Modelled P&amp;L", lambda x: x.modelled_pnl, "money"),
+        ("Realised / modelled", lambda x: x.realisation, "ratio"),
+        ("Avg CLV", lambda x: x.avg_clv, "pct"),
+        ("CLV sample", lambda x: len(x.clv_values), "int"),
+    ]:
+        cells = []
+        for strategy in comparison.strategies:
+            value = getter(strategy)
+            if value is None:
+                cells.append("&mdash;")
+            elif kind == "pct":
+                cells.append(f"{value:+.2%}")
+            elif kind == "money":
+                cells.append(f"{value:+,.2f}")
+            elif kind == "ratio":
+                cells.append(f"&times;{value:,.2f}")
+            elif kind == "int":
+                cells.append(f"{value:,}")
+            else:
+                cells.append(f"{value:,.0f}")
+        comp_rows.append(
+            f"<tr><td>{label}</td>"
+            + "".join(f"<td class='num'>{c}</td>" for c in cells)
+            + "</tr>"
+        )
+
+    interval_cells = []
+    for strategy in comparison.strategies:
+        bounds = strategy.roi_interval()
+        interval_cells.append(
+            "&mdash;" if bounds is None
+            else f"{bounds[0]:+.1%} to {bounds[1]:+.1%}"
+        )
+    comp_rows.insert(
+        4,
+        f"<tr><td>ROI {comparison.confidence:.0%} interval</td>"
+        + "".join(f"<td class='num dim'>{c}</td>" for c in interval_cells)
+        + "</tr>",
+    )
+
+    comp_head = "".join(
+        f"<th class='num'>{_esc(s.name)}</th>" for s in comparison.strategies
+    )
+    comparison_html = f"""<h2>Which strategy is working</h2>
+<div class="scroll"><table><thead><tr><th></th>{comp_head}</tr></thead>
+<tbody>{''.join(comp_rows)}</tbody></table></div>
+<p class="note">{_esc(comparison.verdict())}</p>
+<p class="note">Read the closing-line rows before the profit rows. CLV
+converges in dozens of bets where profit needs thousands, and
+&ldquo;realised over modelled&rdquo; asks whether each strategy's claimed
+edge actually showed up &mdash; which is a different question from which
+one happened to win more.</p>"""
+
     stamp = datetime.now(timezone.utc).astimezone().strftime("%a %d %b %Y, %H:%M %Z")
     return f"""<title>Betting Performance</title>
 <style>{_CSS}</style>
@@ -400,6 +463,7 @@ def performance_report_html(db: Database, cfg: Config) -> str:
 <div class="cards">{card_html}</div>
 {expected}
 <p class="note">{clv_note}</p>
+{comparison_html}
 {open_html}
 {parlay_html}
 {group_table("sport", "sport")}
