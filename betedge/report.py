@@ -23,10 +23,10 @@ def describe(selection, side, line, market=None) -> str:
 
 
 def american(decimal: float) -> str:
-    from .pricing import decimal_to_american
+    """The price as a sportsbook shows it. 2.22 -> '+122'."""
+    from .pricing import format_american
 
-    a = decimal_to_american(decimal)
-    return f"{a:+.0f}"
+    return format_american(decimal)
 
 
 # --------------------------------------------------------------------------
@@ -50,8 +50,8 @@ def console_table(opportunities: Sequence[Opportunity], limit: int = 40) -> str:
                 o.description,
                 pretty_market(o.market),
                 o.soft_book,
-                f"{o.soft_price:.2f} ({american(o.soft_price)})",
-                f"{o.fair_price:.2f}",
+                f"{american(o.soft_price)} ({o.soft_price:.2f})",
+                f"{american(o.fair_price)}",
                 f"{o.recommended_stake:,.0f}" if o.recommended_stake else "-",
                 o.matchup,
                 _relative(o.commence_time, o.scanned_at),
@@ -106,7 +106,7 @@ def shortlist(opportunities: Sequence[Opportunity], limit: int = 12) -> str:
     out.append(header)
     out.append("-" * len(header))
     for i, o in enumerate(playable[:limit], 1):
-        price = f"{o.soft_price:.2f} ({american(o.soft_price)})"
+        price = f"{american(o.soft_price)} ({o.soft_price:.2f})"
         ident = o.db_id if getattr(o, "db_id", None) else i
         out.append(
             f"{ident:>3}  {o.ev:>+5.1%}  {_liquidity_label(o.liquidity):<6} "
@@ -319,7 +319,8 @@ def performance_report_html(db: Database, cfg: Config) -> str:
             f"<tr><td class='num dim'>{r['id']}</td><td class='bet'>{_esc(r['selection'])} "
             f"{_esc(r['side'])} {_esc(r['line'] if r['line'] is not None else '')}</td>"
             f"<td class='dim'>{_esc(pretty_market(r['market'] or ''))}</td>"
-            f"<td>{_esc(r['book'])}</td><td class='num'>{r['price']:.2f}</td>"
+            f"<td>{_esc(r['book'])}</td>"
+            f"<td class='num'>{_esc(american(r['price']))}</td>"
             f"<td class='num'>{r['stake']:,.0f}</td>"
             f"<td class='num'>{fmt(r['ev_at_bet'],'pct')}</td>"
             f"<td class='dim'>{_esc(r['matchup'])}</td></tr>"
@@ -495,7 +496,7 @@ def distribution_report(assessments: Sequence, min_ev: float, top: int = 15) -> 
         out.append(
             f"  {mark:<6}{a.ev:>+7.2%} {a.required_ev:>+6.2%} {a.shortfall:>+7.2%}  "
             f"{a.liquidity:>5.2f} {a.overround:>5.2%}  "
-            f"{a.description:<44.44} {a.soft_price:>6.2f}  {a.matchup[:28]}"
+            f"{a.description:<44.44} {american(a.soft_price):>6}  {a.matchup[:28]}"
         )
     out.append("")
     n_flag = sum(1 for a in assessments if a.ev >= a.required_ev)

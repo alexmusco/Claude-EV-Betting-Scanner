@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import budget as B
+from . import pricing as P
 from . import report as R
 from .closing import capture_closing_lines
 from .config import Config
@@ -489,7 +490,7 @@ def cmd_show(cfg: Config, args) -> int:
         liq = R._liquidity_label(r["liquidity"] if "liquidity" in r.keys() else None)
         print(
             f"{r['id']:>5}  {r['ev']:>+6.1%}  {liq:<6} {desc:<46.46} "
-            f"{r['soft_book']:<12} {r['soft_price']:>7.2f} "
+            f"{r['soft_book']:<12} {R.american(r['soft_price']):>7} "
             f"{(r['recommended_stake'] or 0):>7,.0f}  {when:>7}  "
             f"{r['away_team']} @ {r['home_team']}"
         )
@@ -538,7 +539,7 @@ def cmd_bet(cfg: Config, args) -> int:
     print(
         f"Logged bet #{bet_id}: "
         f"{R.describe(bet['selection'], bet['side'], bet['line'], bet['market'])} "
-        f"@ {bet['price']:.2f} on {bet['book']} for {bet['stake']:,.0f}"
+        f"@ {R.american(bet['price'])} on {bet['book']} for {bet['stake']:,.0f}"
         + (f" (EV {bet['ev_at_bet']:+.1%})" if bet["ev_at_bet"] is not None else "")
     )
     if bet["status"] != "pending":
@@ -716,7 +717,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("bet", help="log a bet you placed")
     s.add_argument("opportunity_id", type=int, nargs="?")
     s.add_argument("--stake", type=float, required=True)
-    s.add_argument("--price", type=float, help="the price you actually got")
+    s.add_argument("--price", type=P.parse_price,
+                   help="the price you actually got, American (+122, -110) "
+                        "or decimal (2.22). Negative or >=100 is read as "
+                        "American.")
     s.add_argument("--book")
     s.add_argument("--notes")
     s.add_argument("--settle", choices=["won", "lost", "push", "void",

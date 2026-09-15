@@ -166,3 +166,48 @@ class TestTwoWayFair:
     def test_no_vig_price_beats_the_posted_price(self):
         a, b = P.no_vig_price(1.91, 1.91)
         assert a > 1.91 and b > 1.91
+
+
+class TestPriceParsing:
+    """
+    US sportsbooks quote American, so that is what gets typed at the CLI.
+    The maths needs decimal. Reading -110 as a decimal price silently
+    produces nonsense rather than an error, so the ambiguity has to be
+    resolved before it reaches anything.
+    """
+
+    @pytest.mark.parametrize("given,decimal", [
+        (-110, 1 + 100 / 110), (122, 2.22), (-150, 1.6667), (250, 3.5),
+        (100, 2.0), (-100, 2.0),
+    ])
+    def test_american_input_converts(self, given, decimal):
+        assert P.parse_price(given) == pytest.approx(decimal, abs=1e-3)
+
+    @pytest.mark.parametrize("given", [1.91, 2.22, 3.5, 1.05, 99.0])
+    def test_decimal_input_passes_through(self, given):
+        assert P.parse_price(given) == pytest.approx(given)
+
+    @pytest.mark.parametrize("given", ["+122", "122", "-110", " -110 ", "2.22"])
+    def test_strings_parse(self, given):
+        assert P.parse_price(given) > 1.0
+
+    def test_the_ranges_do_not_overlap_in_practice(self):
+        """A decimal of 100 already implies +9900; American starts at 100.
+        Nothing realistic sits in both."""
+        assert P.parse_price(100) == pytest.approx(2.0), "read as American"
+        assert P.parse_price(99.0) == pytest.approx(99.0), "read as decimal"
+
+    @pytest.mark.parametrize("given", [0, 1.0, 0.5, -0.5])
+    def test_impossible_prices_are_rejected(self, given):
+        with pytest.raises(ValueError, match="not a usable price"):
+            P.parse_price(given)
+
+    def test_round_trip_through_display(self):
+        for american in (-110, 122, -250, 400):
+            d = P.parse_price(american)
+            assert P.format_american(d) == f"{american:+d}"
+
+    def test_format_matches_what_a_book_shows(self):
+        assert P.format_american(2.22) == "+122"
+        assert P.format_american(1.909) == "-110"
+        assert P.format_american(2.0) == "+100"

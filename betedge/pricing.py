@@ -46,6 +46,50 @@ def decimal_to_american(decimal: float) -> float:
     return -100.0 / (decimal - 1.0)
 
 
+def parse_price(value: float | str) -> float:
+    """
+    Accept a price in either format and return decimal.
+
+    Sportsbooks in the US quote American, so that is what you read off the
+    screen and what you will type. The maths needs decimal. Guessing
+    between them is safe because the ranges do not overlap in practice:
+    a decimal price is above 1.0 and, at 100.0, already implies +9900,
+    while American is at or beyond 100 in either direction.
+
+    Anything negative is unambiguously American.
+
+        parse_price(-110)  -> 1.909
+        parse_price(122)   -> 2.22
+        parse_price(2.22)  -> 2.22
+    """
+    if isinstance(value, str):
+        value = float(value.strip().lstrip("+"))
+    value = float(value)
+    if value < 0:
+        # American odds never fall between -100 and 0; a value there is a
+        # typo, not a price, and converting it yields a plausible-looking
+        # number (-0.5 becomes decimal 201) rather than an error.
+        if value > -100:
+            raise ValueError(
+                f"{value} is not a usable price: American odds are at or "
+                "beyond -100."
+            )
+        return american_to_decimal(value)
+    if value >= 100:
+        return american_to_decimal(value)
+    if value <= 1.0:
+        raise ValueError(
+            f"{value} is not a usable price: decimal odds must exceed 1.0, "
+            "and American odds are at or beyond +/-100."
+        )
+    return value
+
+
+def format_american(decimal: float) -> str:
+    """Decimal to the string a sportsbook shows. 2.22 -> '+122'."""
+    return f"{decimal_to_american(decimal):+.0f}"
+
+
 def implied(decimal: float) -> float:
     """Raw (vigged) implied probability."""
     return 1.0 / decimal

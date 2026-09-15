@@ -59,10 +59,16 @@ The id column is what `betedge bet <id> --stake <amount>` takes.
 Then log what you actually got down:
 
 ```bash
-bet bet 1 --stake 25            # the id from the list
-bet bet 1 --stake 25 --price 2.05   # if the price moved before you clicked
-bet settle 1 won                # won | lost | push | void | half_won | half_lost
+bet bet 1 --stake 25              # the id from the list
+bet bet 1 --stake 25 --price -110 # if the price moved before you clicked
+bet settle 1 won                  # won | lost | push | void | half_won | half_lost
 ```
+
+Prices are shown and accepted in American, because that is what
+DraftKings puts on the screen. `--price` takes either format — anything
+negative or at/beyond ±100 is read as American, anything between 1 and 100
+as decimal, and the two ranges do not overlap for any realistic price.
+Decimal is what gets stored, because that is what the maths uses.
 
 And periodically:
 
