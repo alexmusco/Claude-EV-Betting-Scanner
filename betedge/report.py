@@ -141,6 +141,45 @@ def scan_summary(result: ScanResult) -> str:
     return "\n".join(lines)
 
 
+def near_miss_note(result) -> str:
+    """
+    How close the board came, for a run that produced nothing.
+
+    A count of rejected legs says nothing actionable. The same count means
+    "come back tomorrow, the lines barely moved" or "this board is nowhere
+    near and no amount of waiting fixes it", and only the size of the miss
+    tells them apart.
+    """
+    if not result.near_misses or result.leg_bar is None:
+        return ""
+    out = [
+        f"Every leg needed a de-vigged {result.leg_bar:.1%} to survive the "
+        f"filter -- that is the pick'em ladder's break-even, less the "
+        f"min_leg_edge allowance.",
+        "Closest legs that missed it:",
+    ]
+    for leg, edge, breakeven in result.near_misses[:5]:
+        out.append(
+            f"  {leg.hit_prob:>6.1%}  (short by {abs(edge - 0):.1%} of "
+            f"break-even {breakeven:.1%})  {leg.description:<38.38} "
+            f"{leg.book}"
+        )
+    best = result.near_misses[0]
+    if best[0].hit_prob >= result.leg_bar - 0.015:
+        out.append(
+            "These are close. The pick'em lines are near Pinnacle's fair "
+            "value but not on it -- worth re-running as the lines move."
+        )
+    else:
+        out.append(
+            "These are not close. The pick'em lines are sitting on "
+            "Pinnacle's fair value, which means no standalone edge to "
+            "build on, and a ticket that only works through assumed "
+            "correlation is flagged suspect and given no stake anyway."
+        )
+    return "\n".join(out)
+
+
 def _relative(when: datetime, now: datetime) -> str:
     mins = (when - now).total_seconds() / 60
     if mins < 60:

@@ -728,6 +728,38 @@ ticket is positive only in the first, the entire case for betting it is a
 correlation estimate rather than a price, and the report says so in a
 coloured box rather than in a footnote.
 
+### When a scan returns nothing
+
+That is the normal result, and the run says how close it came:
+
+```
+Every leg needed a de-vigged 51.7% to survive the filter -- that is the
+pick'em ladder's break-even, less the min_leg_edge allowance.
+Closest legs that missed it:
+   51.3%  (short by 3.6% of break-even 54.9%)  Isiah Pacheco Over 48.5    underdog
+   50.0%  (short by 4.9% of break-even 54.9%)  Patrick Mahomes Over 249.5 underdog
+```
+
+A count of rejected legs is not actionable — the same count means "come
+back tomorrow, the lines barely moved" or "this board is nowhere near",
+and only the size of the miss separates them.
+
+**Legs clustering near 50% is the expected case, not a fault.** A balanced
+two-sided Pinnacle market de-vigs to about 50% a side, and `worst_case`
+de-vigging takes the most conservative estimate for *both* sides, so a
+pick'em site posting the consensus line produces no leg with standalone
+edge. Tickets appear when a pick'em line sits away from Pinnacle's fair
+value — not on every slate.
+
+Correlation could in principle bridge that gap: at ρ = 0.45 a 3-pick
+breaks even at 41.6% a leg rather than 54.9%. The tool deliberately will
+not take it. A ticket that is positive *only* through assumed correlation
+trips `only_+ev_because_of_assumed_correlation`, is marked suspect and is
+staked at zero — so while correlations are prior-based rather than
+measured, the optimizer stakes only tickets whose legs stand up on their
+own. `--min-leg-edge -0.10` shows what correlation alone would build, as a
+diagnostic; every ticket it surfaces is suspect by construction.
+
 ### Guards
 
 Same philosophy as `scan.py`: reject and flag rather than trust.

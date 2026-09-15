@@ -788,6 +788,8 @@ def cmd_parlay_scan(cfg: Config, args) -> int:
         cfg.bankroll.amount = args.bankroll
     if args.min_ev is not None:
         cfg.parlay.min_ev = args.min_ev
+    if args.min_leg_edge is not None:
+        cfg.parlay.min_leg_edge = args.min_leg_edge
     if args.max_legs is not None:
         cfg.parlay.max_legs = args.max_legs
     if args.draws is not None:
@@ -834,6 +836,11 @@ def cmd_parlay_scan(cfg: Config, args) -> int:
     _log_spend(db, client, "parlay scan", ",".join(result.sports)[:200])
 
     print(R.parlay_summary(result))
+    if not result.tickets:
+        note = R.near_miss_note(result)
+        if note:
+            print()
+            print(note)
     print(R.roster_note(result, cfg))
     print()
     print(R.parlay_console(
@@ -1520,6 +1527,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=8, help="tickets to print")
     s.add_argument("--bankroll", type=float)
     s.add_argument("--min-ev", type=float, help="e.g. 0.03 for +3%%")
+    s.add_argument("--min-leg-edge", type=float, metavar="X",
+                   help="how far below the ladder's break-even a single leg "
+                        "may sit, e.g. -0.10. Lower it to see what "
+                        "correlation ALONE would build -- those tickets are "
+                        "flagged suspect and staked at zero, so this is a "
+                        "diagnostic, not a way to place more bets.")
     s.add_argument("--max-legs", type=int)
     s.add_argument("--draws", type=int,
                    help="Monte Carlo draws for the final estimate")

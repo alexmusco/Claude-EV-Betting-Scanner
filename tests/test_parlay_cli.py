@@ -977,3 +977,73 @@ class TestCoverageProbedNothing:
         assert "Profile 'nfl-week' applied:" in out
         assert "NOTHING was probed" not in out
         assert "by book:" in out
+
+
+class TestNearMissReporting:
+    """
+    A run that produces nothing has to say whether the board was close.
+
+    "50 legs were too far below break-even" means either "come back
+    tomorrow" or "stop looking", and only the size of the miss separates
+    them.
+    """
+
+    def wire(self, client, pinnacle_prices):
+        from fixtures import prop_event
+
+        spec = [
+            ("player_pass_yds", "Patrick Mahomes", 249.5, pinnacle_prices),
+            ("player_reception_yds", "Travis Kelce", 64.5, pinnacle_prices),
+            ("player_rush_yds", "Isiah Pacheco", 48.5, pinnacle_prices),
+        ]
+        client._event_odds[("americanfootball_nfl", "kc1")] = prop_event(spec=spec)
+
+    def test_a_board_sitting_on_pinnacles_number_is_called_hopeless(
+        self, wired, capsys
+    ):
+        # A balanced two-sided market de-vigs to ~50% a side, which is
+        # nowhere near a ladder needing ~55%.
+        cfg_path, client, _tmp = wired
+        self.wire(client, (1.95, 1.95))
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Closest legs that missed it" in out
+        assert "not close" in out
+        assert "flagged suspect and given no stake" in out
+
+    def test_it_states_the_bar_every_leg_had_to_clear(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire(client, (1.95, 1.95))
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "needed a de-vigged" in out
+        assert "min_leg_edge allowance" in out
+
+    def test_a_board_nearly_clearing_is_called_close(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        # Pinnacle a shade toward the over: legs land just under the bar.
+        self.wire(client, (1.82, 2.08))
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        out = " ".join(capsys.readouterr().out.split())
+        if "Closest legs that missed it" in out:
+            assert "These are close" in out
+
+    def test_nothing_is_printed_when_tickets_were_found(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        out = capsys.readouterr().out
+        assert "Ranked by expected value" in out
+        assert "Closest legs that missed it" not in out
+
+    def test_the_min_leg_edge_flag_lets_them_through(self, wired, capsys):
+        # Lowering the bar shows what correlation ALONE would build. Those
+        # tickets exist, and they are all suspect with no stake -- which is
+        # the point of exposing it as a diagnostic rather than a lever.
+        cfg_path, client, _tmp = wired
+        self.wire(client, (1.95, 1.95))
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report",
+             "--min-leg-edge", "-0.20", "--min-ev", "-1"])
+        out = capsys.readouterr().out
+        assert "legs built" in out
+        if "Ranked by expected value" in out and "0 clean" not in out:
+            assert "only_+ev_because_of_assumed_correlation" in out

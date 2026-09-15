@@ -909,6 +909,7 @@ def prefilter_legs(
     product: Product,
     cfg: Config,
     rejections: dict[str, int] | None = None,
+    misses: list | None = None,
 ) -> list[Leg]:
     """
     Narrow the candidate pool before the search sees it.
@@ -940,7 +941,14 @@ def prefilter_legs(
             reject("leg_probability_out_of_range")
             continue
         if product.is_pickem:
-            if leg.edge_vs(breakeven) < pc.min_leg_edge:
+            edge = leg.edge_vs(breakeven)
+            if edge < pc.min_leg_edge:
+                # Recorded, not just counted. "50 legs were too far below
+                # break-even" cannot tell you whether the board missed by
+                # half a point or by ten, and those call for opposite
+                # decisions: come back tomorrow, or stop looking.
+                if misses is not None:
+                    misses.append((leg, edge, breakeven))
                 reject("leg_too_far_below_breakeven")
                 continue
         else:
@@ -1619,6 +1627,11 @@ class ParlayScanResult:
     #: identical in an empty board unless the scan says which.
     books_requested: list = field(default_factory=list)
     legs_by_book: dict = field(default_factory=dict)
+    #: The closest legs that failed the break-even filter, best first, and
+    #: the bar they had to clear. Together they say whether the board was
+    #: nearly there or nowhere near.
+    near_misses: list = field(default_factory=list)
+    leg_bar: float | None = None
 
     @property
     def silent_books(self) -> list[str]:
@@ -1852,6 +1865,7 @@ def build_tickets(
     base = copula.standard_normals(pc.search_draws, max(pc.max_legs, 2), pc.seed)
 
     found: dict[tuple, Ticket] = {}
+    misses: list = [] if state is not None else None
     kept_total = 0
     groups = 0
 
@@ -1859,7 +1873,7 @@ def build_tickets(
         for pool in group_legs(
             [leg for leg in legs if _leg_serves(leg, product, cfg)], cfg
         ):
-            kept = prefilter_legs(pool, product, cfg, rejections)
+            kept = prefilter_legs(pool, product, cfg, rejections, misses)
             kept_total += len(kept)
             if len(kept) < max(pc.min_legs, product.min_legs):
                 continue
@@ -1874,6 +1888,10 @@ def build_tickets(
         state.legs_after_filter = kept_total
         state.groups_searched = groups
         state.candidates_evaluated = len(found)
+        state.near_misses = sorted(misses, key=lambda m: -m[1])[:8]
+        state.leg_bar = min(
+            (p.easiest_breakeven() + pc.min_leg_edge for p in products), default=None
+        )
 
     shortlist = rescore(
         rank_by_ev(list(found.values()), pc.top_n * 3),
