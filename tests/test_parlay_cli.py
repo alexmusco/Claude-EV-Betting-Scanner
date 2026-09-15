@@ -813,6 +813,32 @@ class TestCoverageByBookCommand:
         out = " ".join(capsys.readouterr().out.split())
         assert "best pick'em book is prizepicks" in out
         assert "draftkings is a sportsbook, not a pick'em site" in out
+        # No parlay product is configured, so the route to using one is
+        # not advertised -- it would be pointing at a workflow the user
+        # has not asked for.
+        assert "--products draftkings_parlay" not in out
+        assert "the pick'em optimizer does not use it" in out
+
+    def test_the_parlay_route_is_named_only_if_a_parlay_product_is_configured(
+        self, wired, capsys
+    ):
+        cfg_path, client, _tmp = wired
+        from fixtures import KC_STACK
+
+        spec = KC_STACK + [
+            ("player_receptions", "Travis Kelce", 5.5, (1.70, 2.25)),
+            ("player_pass_tds", "Patrick Mahomes", 1.5, (1.80, 2.05)),
+        ]
+        client._event_odds[("americanfootball_nfl", "kc1")] = two_book_event(
+            spec=spec,
+            books_and_shifts=(("draftkings", 0.0), ("prizepicks", 0.0)),
+        )
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["parlay"]["products"] = ["prizepicks_power", "draftkings_parlay"]
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = " ".join(capsys.readouterr().out.split())
         assert "--products draftkings_parlay" in out
 
     def test_it_shows_props_per_game(self, wired, capsys):

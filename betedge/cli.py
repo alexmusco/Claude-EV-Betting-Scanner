@@ -1025,15 +1025,30 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
                     f"to fill a ticket (best is {book.book} at "
                     f"{book.props_per_event:.1f}; {P.MIN_PROPS_PER_EVENT} needed)."
                 )
-            # A sportsbook is reported, never recommended as a pick'em book:
-            # it prices its own parlays rather than paying a fixed ladder.
+            # A sportsbook is shown for context and never recommended. It
+            # prices its own parlays rather than paying a fixed ladder, so
+            # it is not what this optimizer is for -- and the route to
+            # using it is only worth naming to someone who has actually
+            # configured a parlay product.
+            parlay_configured = any(
+                P.PayoutTable.load(cfg.parlay.payouts_path)
+                .products.get(k, None) is not None
+                and P.PayoutTable.load(cfg.parlay.payouts_path)
+                .get(k).kind == P.KIND_PARLAY
+                for k in cfg.parlay.products
+            )
             for other in row.parlay_books:
                 if other.usable:
+                    tail = (
+                        " Use it with `--products draftkings_parlay`."
+                        if parlay_configured
+                        else " Shown for reference; the pick'em optimizer "
+                        "does not use it."
+                    )
                     print(
                         f"  {row.sport}: {other.book} is a sportsbook, not a "
-                        f"pick'em site -- its parlays are priced by the book. "
-                        f"Use it with `--products draftkings_parlay`, not in "
-                        f"`parlay.pickem_books`."
+                        f"pick'em site -- its parlays are priced by the book "
+                        f"rather than paid on a fixed ladder.{tail}"
                     )
     else:
         print(

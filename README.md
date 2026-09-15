@@ -571,13 +571,15 @@ you chose. Two positively correlated legs hit together more often than a
 independence the multiple assumes is the edge, and it is structural: it is
 there whether or not anybody made a mistake.
 
-**DraftKings same-game parlays are the secondary, harder target.** DK runs
-its own correlation model and already discounts correlated SGP legs. An
-edge there means their correlation estimate is wrong, not merely that
-correlation exists. The tool supports it, expects far fewer hits, and
-flags every result from it as lower confidence. Pass `--offered-price`
-with what the app actually shows, because the product of the legs is an
-upper bound a same-game parlay will never pay.
+**DraftKings same-game parlays are supported but switched off.** DK runs
+its own correlation model and already discounts correlated SGP legs, so an
+edge there means their estimate is wrong rather than merely that
+correlation exists — far fewer hits, and every result flagged lower
+confidence. `draftkings_parlay` stays in the payout table for anyone who
+wants it (add it to `parlay.products` and pass `--offered-price` with what
+the app actually shows, since the product of the legs is an upper bound a
+same-game parlay will never pay), but it is not in the shipped defaults
+and the pick'em workflow does not point at it.
 
 **Cross-game parlays are a trap.** The vig compounds — four legs at 4.5%
 hold each is `1.045⁴ − 1`, about 19% — and legs in different games have no
@@ -937,7 +939,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          811 tests; no network, no credits spent
+tests/          812 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 

@@ -277,6 +277,13 @@ parlay:
   # Underdog 3-pick pays 6x, which is a 3.5-point difference in the hit
   # rate each needs, and blending them would hide that.
   #
+  # Underdog and PrizePicks only. DraftKings same-game parlays are
+  # supported by the code (`draftkings_parlay`, priced from the book with
+  # --offered-price) but are deliberately not listed: DK runs its own
+  # correlation model and already discounts correlated legs, so an edge
+  # there means their estimate is wrong rather than that correlation
+  # exists. Far fewer hits, lower confidence, and not what this is for.
+  #
   # Add the flex ladders too if you enter those; they are a genuinely
   # different bet, not a variant:
   #   - prizepicks_flex
