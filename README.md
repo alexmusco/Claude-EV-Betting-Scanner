@@ -806,22 +806,22 @@ pytest
 
 | Command | Cost | What it does |
 |---|---|---|
-| `bet profiles` | free | Named override bundles, and what each would change against your config |
-| `bet daily` | budgeted | Closing lines, then a budgeted scan, then a shortlist. The one to run. |
-| `bet budget` | free | Credits left, today's allowance, recent spending |
-| `bet quota` | free | What your config costs and how often you can run it |
-| `bet sports` | free | Live sport keys and prop coverage |
-| `bet scan` | varies | A scan with manual flags, ignoring the daily plan |
-| `bet show` | free | Re-print a scan |
-| `bet bet <id> --stake N` | free | Log a bet you placed |
-| `bet settle <id> won` | free | Settle it |
-| `bet close` | ~1/event | Capture closing lines |
-| `bet report` | free | Performance and CLV |
-| `bet export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |
-| `bet parlay verify-payouts` | free | Print the payout ladders. **Read this before trusting any ticket EV.** |
-| `bet parlay coverage` | ~1/event | Which sports have usable two-sided Pinnacle prop coverage |
-| `bet parlay correlations` | free | Fit pairwise correlations from your game logs — and learn rosters from the same file |
-| `bet parlay rosters` | free | Who plays for whom, where it came from, how stale it is. `--refresh` pulls the feed |
-| `bet parlay scan` | budgeted | Build and rank multi-leg tickets |
-| `bet parlay bet <id> --stake N` | free | Log an entry you placed |
-| `bet parlay settle <id> --hit K` | free | Settle it by how many legs landed |
+| `betedge profiles` | free | Named override bundles, and what each would change against your config |
+| `betedge daily` | budgeted | Closing lines, then a budgeted scan, then a shortlist. The one to run. |
+| `betedge budget` | free | Credits left, today's allowance, recent spending |
+| `betedge quota` | free | What your config costs and how often you can run it |
+| `betedge sports` | free | Live sport keys and prop coverage |
+| `betedge scan` | varies | A scan with manual flags, ignoring the daily plan |
+| `betedge show` | free | Re-print a scan |
+| `betedge bet <id> --stake N` | free | Log a bet you placed |
+| `betedge settle <id> won` | free | Settle it |
+| `betedge close` | ~1/event | Capture closing lines |
+| `betedge report` | free | Performance and CLV |
+| `betedge export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |
+| `betedge parlay verify-payouts` | free | Print the payout ladders. **Read this before trusting any ticket EV.** |
+| `betedge parlay coverage` | ~1/event | Which sports have usable two-sided Pinnacle prop coverage |
+| `betedge parlay correlations` | free | Fit pairwise correlations from your game logs — and learn rosters from the same file |
+| `betedge parlay rosters` | free | Who plays for whom, where it came from, how stale it is. `--refresh` pulls the feed |
+| `betedge parlay scan` | budgeted | Build and rank multi-leg tickets |
+| `betedge parlay bet <id> --stake N` | free | Log an entry you placed |
+| `betedge parlay settle <id> --hit K` | free | Settle it by how many legs landed |
