@@ -9,53 +9,17 @@ from typing import Sequence
 
 from .config import Config
 from .db import Database
-from .scan import Opportunity, ScanResult
+from .markets import PRETTY_MARKET, pretty_market  # noqa: F401  (re-export)
+from .scan import Opportunity, ScanResult, _render_bet
 
-PRETTY_MARKET = {
-    "player_points": "Points",
-    "player_rebounds": "Rebounds",
-    "player_assists": "Assists",
-    "player_threes": "Threes",
-    "player_blocks": "Blocks",
-    "player_steals": "Steals",
-    "player_turnovers": "Turnovers",
-    "player_points_rebounds_assists": "PRA",
-    "player_points_rebounds": "P+R",
-    "player_points_assists": "P+A",
-    "player_rebounds_assists": "R+A",
-    "player_blocks_steals": "B+S",
-    "player_pass_yds": "Pass yds",
-    "player_pass_tds": "Pass TDs",
-    "player_rush_yds": "Rush yds",
-    "player_receptions": "Receptions",
-    "player_reception_yds": "Rec yds",
-    "player_shots_on_goal": "Shots on goal",
-    "player_shots_on_target": "Shots on target",
-    "pitcher_strikeouts": "Pitcher Ks",
-    "batter_total_bases": "Total bases",
-    "batter_hits": "Hits",
-}
-
-
-def pretty_market(key: str) -> str:
-    base = key.replace("_alternate", "")
-    label = PRETTY_MARKET.get(base, base.replace("player_", "").replace("_", " ").title())
-    return f"{label} (alt)" if key.endswith("_alternate") else label
-
-
-def describe(selection, side, line) -> str:
+def describe(selection, side, line, market=None) -> str:
     """
-    Render a bet the way `Opportunity.description` does, but from loose
-    values so database rows and API quotes format identically.
+    Render a bet from loose values, so a database row and a live quote
+    format identically. Delegates to the one renderer in scan.py rather
+    than reimplementing it -- the two copies had already drifted, and the
+    drift was the market name going missing.
     """
-    s = (side or "").strip().lower()
-    if s in ("over", "under", "yes", "no"):
-        base = selection if selection and selection.strip().lower() != s else "Total"
-        out = f"{base} {side}"
-        return out if line is None else f"{out} {line:g}"
-    if line is None:
-        return f"{selection} ML"
-    return f"{selection} {line:+g}"
+    return _render_bet(selection, side, line, market)
 
 
 def american(decimal: float) -> str:
@@ -136,7 +100,7 @@ def shortlist(opportunities: Sequence[Opportunity], limit: int = 12) -> str:
 
     out = []
     header = (
-        f"{'id':>3}  {'EV':>6}  {'liq':<6} {'bet':<38} {'price':>14} "
+        f"{'id':>3}  {'EV':>6}  {'liq':<6} {'bet':<44} {'price':>14} "
         f"{'stake':>7}  game"
     )
     out.append(header)
@@ -146,7 +110,7 @@ def shortlist(opportunities: Sequence[Opportunity], limit: int = 12) -> str:
         ident = o.db_id if getattr(o, "db_id", None) else i
         out.append(
             f"{ident:>3}  {o.ev:>+5.1%}  {_liquidity_label(o.liquidity):<6} "
-            f"{o.description:<38.38} {price:>14} "
+            f"{o.description:<44.44} {price:>14} "
             f"{o.recommended_stake:>7,.0f}  "
             f"{o.matchup[:40]} ({_relative(o.commence_time, o.scanned_at)})"
         )
@@ -519,8 +483,8 @@ def distribution_report(assessments: Sequence, min_ev: float, top: int = 15) -> 
 
     # ---- the near misses ------------------------------------------------
     out.append(f"CLOSEST {top} TO CLEARING, BEST FIRST")
-    header = (f"  {'':<6}{'EV':>7} {'bar':>7} {'short':>7}  {'liq':>5} {'orr':>6}  "
-              f"{'bet':<34} {'price':>6}  game")
+    header = (f"  {'':<6}{'EV':>8} {'bar':>7} {'short':>8}  {'liq':>5} {'orr':>6}  "
+              f"{'bet':<44} {'price':>6}  game")
     out.append(header)
     out.append("  " + "-" * (len(header) - 2))
     for a in sorted(assessments, key=lambda x: x.shortfall)[:top]:
@@ -529,9 +493,9 @@ def distribution_report(assessments: Sequence, min_ev: float, top: int = 15) -> 
         # table looks like a list of bets when only the marked rows are.
         mark = "FLAG " if a.ev >= a.required_ev else "     "
         out.append(
-            f"  {mark:<6}{a.ev:>+6.2%} {a.required_ev:>+6.2%} {a.shortfall:>+6.2%}  "
+            f"  {mark:<6}{a.ev:>+7.2%} {a.required_ev:>+6.2%} {a.shortfall:>+7.2%}  "
             f"{a.liquidity:>5.2f} {a.overround:>5.2%}  "
-            f"{a.description:<34.34} {a.soft_price:>6.2f}  {a.matchup[:30]}"
+            f"{a.description:<44.44} {a.soft_price:>6.2f}  {a.matchup[:28]}"
         )
     out.append("")
     n_flag = sum(1 for a in assessments if a.ev >= a.required_ev)

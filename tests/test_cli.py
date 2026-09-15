@@ -312,3 +312,36 @@ class TestShow:
         cfg_path, _client, _ = wired
         assert run(["--config", str(cfg_path), "show"]) == 1
         assert "betedge daily" in capsys.readouterr().out
+
+
+class TestMarketIsAlwaysShown:
+    def test_show_names_the_stat(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        # The fixture's prop carries an implausible edge and is flagged
+        # suspect, so it is behind --include-suspect. The stat has to be
+        # named there too -- suspect rows are the ones you look at hardest.
+        run(["--config", str(cfg_path), "show", "--include-suspect"])
+        assert "Pitcher Ks" in capsys.readouterr().out
+
+    def test_the_bet_confirmation_names_the_stat(self, wired, capsys, tmp_path):
+        """The worst place to omit it: the line confirming what you logged."""
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        db = Database(tmp_path / "t.db")
+        opp = db.conn.execute(
+            "SELECT id FROM opportunities WHERE market='pitcher_strikeouts' "
+            "AND suspect=0 LIMIT 1"
+        ).fetchone()
+        db.close()
+        if opp is None:
+            pytest.skip("no prop opportunity in this fixture run")
+        run(["--config", str(cfg_path), "bet", str(opp["id"]), "--stake", "20"])
+        assert "Pitcher Ks" in capsys.readouterr().out
+
+    def test_diagnose_names_the_stat(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "diagnose"])
+        assert "Pitcher Ks" in capsys.readouterr().out

@@ -278,6 +278,84 @@ def expand_sport_keys(patterns: Sequence[str], available: Sequence[str]) -> list
     return resolved
 
 
+#: Short human labels for market keys. A prop without its stat is not a
+#: bet you can place -- "Max Fried Under 4.5" could be strikeouts, hits
+#: allowed or outs -- so every rendering path appends one of these.
+PRETTY_MARKET = {
+    # NBA
+    "player_points": "Points",
+    "player_rebounds": "Rebounds",
+    "player_assists": "Assists",
+    "player_threes": "Threes",
+    "player_blocks": "Blocks",
+    "player_steals": "Steals",
+    "player_turnovers": "Turnovers",
+    "player_points_rebounds_assists": "PRA",
+    "player_points_rebounds": "P+R",
+    "player_points_assists": "P+A",
+    "player_rebounds_assists": "R+A",
+    "player_blocks_steals": "B+S",
+    # NFL
+    "player_pass_yds": "Pass yds",
+    "player_pass_tds": "Pass TDs",
+    "player_pass_completions": "Completions",
+    "player_pass_attempts": "Pass att",
+    "player_pass_interceptions": "Ints",
+    "player_rush_yds": "Rush yds",
+    "player_rush_attempts": "Rush att",
+    "player_receptions": "Receptions",
+    "player_reception_yds": "Rec yds",
+    "player_pass_rush_reception_yds": "Pass+Rush+Rec yds",
+    "player_kicking_points": "Kicking pts",
+    "player_tackles_assists": "Tackles+ast",
+    "player_anytime_td": "Anytime TD",
+    # NHL
+    "player_shots_on_goal": "Shots on goal",
+    "player_blocked_shots": "Blocked shots",
+    "player_total_saves": "Saves",
+    "player_goal_scorer_anytime": "Anytime goal",
+    # MLB
+    "pitcher_strikeouts": "Pitcher Ks",
+    "pitcher_hits_allowed": "Hits allowed",
+    "pitcher_earned_runs": "Earned runs",
+    "pitcher_outs": "Outs",
+    "batter_total_bases": "Total bases",
+    "batter_hits": "Hits",
+    "batter_rbis": "RBIs",
+    "batter_runs_scored": "Runs",
+    "batter_home_runs": "Home runs",
+    "batter_strikeouts": "Batter Ks",
+    "batter_walks": "Walks",
+    # Soccer
+    "player_shots_on_target": "Shots on target",
+    "player_shots": "Shots",
+    # Game level
+    "totals": "Total",
+    "totals_h1": "1H total",
+    "team_totals": "Team total",
+}
+
+#: Markets whose selection already names the bet, so a label adds nothing.
+#: "Kansas City Chiefs ML (H2H)" is noise; "Max Fried Under 4.5" without
+#: its stat is unplaceable.
+SELF_DESCRIBING_MARKETS = {"h2h", "h2h_3_way", "spreads", "alternate_spreads"}
+
+
+def pretty_market(key: str) -> str:
+    base = (key or "").replace("_alternate", "")
+    label = PRETTY_MARKET.get(
+        base, base.replace("player_", "").replace("_", " ").capitalize()
+    )
+    return f"{label} (alt)" if (key or "").endswith("_alternate") else label
+
+
+def market_adds_information(key: str) -> bool:
+    """Whether naming the market tells you something the selection does not."""
+    if not key:
+        return False
+    return key.replace("_alternate", "") not in SELF_DESCRIBING_MARKETS
+
+
 def matches_any(sport_key: str, patterns: Sequence[str]) -> bool:
     """
     Whether a sport key matches any of the given glob patterns.

@@ -472,12 +472,12 @@ def cmd_show(cfg: Config, args) -> int:
         db.close()
         return 0
 
-    header = (f"{'id':>5}  {'EV':>7}  {'liq':<6} {'bet':<40} {'book':<12} "
+    header = (f"{'id':>5}  {'EV':>7}  {'liq':<6} {'bet':<46} {'book':<12} "
               f"{'price':>7} {'stake':>7}  {'starts':>7}  game")
     print(header)
     print("-" * len(header))
     for r, mins_out in live:
-        desc = R.describe(r["selection"], r["side"], r["line"])
+        desc = R.describe(r["selection"], r["side"], r["line"], r["market"])
         if mins_out is None:
             when = "-"
         elif mins_out < 60:
@@ -488,7 +488,7 @@ def cmd_show(cfg: Config, args) -> int:
             when = f"{mins_out/1440:.1f}d"
         liq = R._liquidity_label(r["liquidity"] if "liquidity" in r.keys() else None)
         print(
-            f"{r['id']:>5}  {r['ev']:>+6.1%}  {liq:<6} {desc:<40.40} "
+            f"{r['id']:>5}  {r['ev']:>+6.1%}  {liq:<6} {desc:<46.46} "
             f"{r['soft_book']:<12} {r['soft_price']:>7.2f} "
             f"{(r['recommended_stake'] or 0):>7,.0f}  {when:>7}  "
             f"{r['away_team']} @ {r['home_team']}"
@@ -537,7 +537,7 @@ def cmd_bet(cfg: Config, args) -> int:
     bet = db.get_bet(bet_id)
     print(
         f"Logged bet #{bet_id}: "
-        f"{R.describe(bet['selection'], bet['side'], bet['line'])} "
+        f"{R.describe(bet['selection'], bet['side'], bet['line'], bet['market'])} "
         f"@ {bet['price']:.2f} on {bet['book']} for {bet['stake']:,.0f}"
         + (f" (EV {bet['ev_at_bet']:+.1%})" if bet["ev_at_bet"] is not None else "")
     )
