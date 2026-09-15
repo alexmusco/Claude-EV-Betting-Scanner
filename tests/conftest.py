@@ -12,7 +12,20 @@ import pytest
 from betedge.config import Config
 from betedge.oddsapi import Quota
 
-NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+# Anchored to import time, not a fixed date.
+#
+# Every fixture offset below is relative to NOW, and the tests that drive
+# the engine directly pass `now=NOW` explicitly, so relative timing stays
+# exactly as deterministic as a hardcoded date would make it.
+#
+# The CLI path is why this cannot be frozen. `betedge daily` calls
+# datetime.now() internally, while the fixtures stamp each quote's
+# last_update at NOW. With a fixed NOW those two drift apart as the wall
+# clock advances, and once the gap passes max_soft_staleness_minutes every
+# quote is stale, every opportunity is flagged suspect, and the CLI tests
+# fail for reasons that have nothing to do with the code. That is a suite
+# that rots on a timer.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 def iso(dt: datetime) -> str:

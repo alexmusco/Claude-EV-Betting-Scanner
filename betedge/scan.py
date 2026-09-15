@@ -435,7 +435,14 @@ def evaluate_event(
             continue
 
         if ev < bar:
-            reject("below_min_ev" if liq.score >= 0.80 else "below_liquidity_bar")
+            # Label by what actually did the rejecting, not by how thin the
+            # market was. "below_liquidity_bar" means precisely: this would
+            # have been flagged under a flat min_ev, and the thin-market
+            # penalty is what stopped it. That is the number worth watching
+            # when deciding whether the penalty is set sensibly -- tagging
+            # every thin-market miss with it, however far below the bar,
+            # made it useless for that.
+            reject("below_liquidity_bar" if ev >= m.min_ev else "below_min_ev")
             continue
 
         flags: list[str] = []
