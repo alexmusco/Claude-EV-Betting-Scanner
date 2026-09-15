@@ -112,3 +112,68 @@ class TestDistributionReport:
                 assessment(ev=-0.02), assessment(ev=-0.03)]
         text = R.distribution_report(rows, min_ev=0.02)
         assert "1 of 4 priced above zero (25%)" in text
+
+
+class TestFlagMarking:
+    """
+    A negative shortfall means cleared, which is correct and unreadable.
+    Without a marker the table looks like a list of bets when only one or
+    two rows are.
+    """
+
+    def _rows(self):
+        return [
+            assessment(ev=0.064, required_ev=0.038, price=2.22),   # cleared
+            assessment(ev=0.028, required_ev=0.038),               # missed
+            assessment(ev=-0.02, required_ev=0.021),               # missed
+        ]
+
+    def test_cleared_rows_are_marked(self):
+        text = R.distribution_report(self._rows(), min_ev=0.02, top=5)
+        # The trailing summary also says FLAG, so count the table rows only.
+        table = text.split("CLOSEST")[1].split("Only the")[0]
+        assert table.count("FLAG") == 1
+
+    def test_the_count_is_stated_in_words(self):
+        text = R.distribution_report(self._rows(), min_ev=0.02, top=5)
+        assert "Only the 1 FLAG row(s) cleared" in text
+        assert "not as a recommendation" in text
+
+    def test_a_board_with_no_hits_says_so_plainly(self):
+        rows = [assessment(ev=-0.03), assessment(ev=0.01, required_ev=0.028)]
+        text = R.distribution_report(rows, min_ev=0.02)
+        assert "Nothing cleared" in text
+        assert "not bets" in text
+        assert "FLAG" not in text.split("CLOSEST")[1]
+
+
+class TestSideLean:
+    def test_a_lean_is_surfaced(self):
+        rows = [assessment(ev=0.01) for _ in range(5)]
+        rows = [
+            QuoteAssessment(
+                sport="baseball_mlb", matchup="A @ B", market="pitcher_strikeouts",
+                tier="primary_prop", description=f"Player {i} Under", book="draftkings",
+                soft_price=2.0, sharp_price=1.95, overround=0.07, liquidity=0.75,
+                ev=0.01, required_ev=0.028, minutes_to_start=200,
+            )
+            for i in range(5)
+        ]
+        text = R.distribution_report(rows, min_ev=0.02)
+        assert "SIDE LEAN" in text and "Under 5" in text
+
+    def test_negative_ev_quotes_are_not_counted(self):
+        rows = [
+            QuoteAssessment(
+                sport="s", matchup="A @ B", market="m", tier="primary_prop",
+                description=f"P{i} Under", book="draftkings", soft_price=2.0,
+                sharp_price=1.95, overround=0.07, liquidity=0.75,
+                ev=-0.05, required_ev=0.028, minutes_to_start=200,
+            )
+            for i in range(6)
+        ]
+        assert "SIDE LEAN" not in R.distribution_report(rows, min_ev=0.02)
+
+    def test_too_few_positives_to_be_meaningful_is_silent(self):
+        rows = [assessment(ev=0.01)]
+        assert "SIDE LEAN" not in R.distribution_report(rows, min_ev=0.02)

@@ -500,16 +500,44 @@ def distribution_report(assessments: Sequence, min_ev: float, top: int = 15) -> 
     out.append("  (quartiles: 25th / median / 75th)")
     out.append("")
 
+    # ---- systematic side lean -------------------------------------------
+    sides = {"Over": 0, "Under": 0}
+    for a in assessments:
+        if a.ev <= 0:
+            continue
+        for name in sides:
+            if a.description.endswith(name) or f" {name} " in a.description:
+                sides[name] += 1
+    if sum(sides.values()) >= 4:
+        out.append("SIDE LEAN AMONG POSITIVE-EV QUOTES")
+        out.append(f"  Over {sides['Over']}   Under {sides['Under']}")
+        out.append("  A heavy lean is not noise. Soft books shade the side the "
+                   "public bets,")
+        out.append("  which on player props is the Over, leaving the Under "
+                   "relatively better priced.")
+        out.append("")
+
     # ---- the near misses ------------------------------------------------
     out.append(f"CLOSEST {top} TO CLEARING, BEST FIRST")
-    header = (f"  {'EV':>7} {'bar':>7} {'short':>7}  {'liq':>5} {'orr':>6}  "
+    header = (f"  {'':<6}{'EV':>7} {'bar':>7} {'short':>7}  {'liq':>5} {'orr':>6}  "
               f"{'bet':<34} {'price':>6}  game")
     out.append(header)
     out.append("  " + "-" * (len(header) - 2))
     for a in sorted(assessments, key=lambda x: x.shortfall)[:top]:
+        # Mark the ones that actually cleared. A negative shortfall means
+        # cleared, which is correct and completely unreadable -- the whole
+        # table looks like a list of bets when only the marked rows are.
+        mark = "FLAG " if a.ev >= a.required_ev else "     "
         out.append(
-            f"  {a.ev:>+6.2%} {a.required_ev:>+6.2%} {a.shortfall:>+6.2%}  "
+            f"  {mark:<6}{a.ev:>+6.2%} {a.required_ev:>+6.2%} {a.shortfall:>+6.2%}  "
             f"{a.liquidity:>5.2f} {a.overround:>5.2%}  "
             f"{a.description:<34.34} {a.soft_price:>6.2f}  {a.matchup[:30]}"
         )
+    out.append("")
+    n_flag = sum(1 for a in assessments if a.ev >= a.required_ev)
+    if n_flag:
+        out.append(f"Only the {n_flag} FLAG row(s) cleared. Everything else is "
+                   f"listed by how close it came, not as a recommendation.")
+    else:
+        out.append("Nothing cleared. These are the closest misses, not bets.")
     return "\n".join(out)
