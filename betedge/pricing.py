@@ -211,12 +211,29 @@ def fair_probs_all_methods(decimals: Sequence[float]) -> dict[str, list[float]]:
 
 def devig_spread(decimals: Sequence[float]) -> float:
     """
-    How much the de-vig methods disagree, in probability points on the first
-    outcome. A wide spread means the market is lopsided enough that your
-    fair estimate is method-dependent -- treat those edges with suspicion.
+    How much the de-vig methods disagree, in probability points, on the
+    outcome where they disagree most. A wide spread means the market is
+    lopsided enough that your fair estimate is method-dependent -- treat
+    those edges with suspicion.
+
+    Measuring only the first outcome, as this used to, is equivalent for a
+    two-way market: the probabilities sum to 1 under every method, so the
+    two disagreements are identical by construction. On a three-way market
+    it is not equivalent, and worse, it is not even well defined. Which
+    outcome lands first depends on how the payload happened to be ordered --
+    in `evaluate_event` the outcomes are sorted by name, so it comes down to
+    which team is alphabetically first. The same 1.25 / 6.00 / 11.00 market
+    scores 0.028 or 0.014 depending on nothing but the teams' initials, and
+    a guard set at 0.04 therefore fired or did not fire at random.
+
+    Taking the maximum over every outcome makes the guard independent of
+    ordering, which is the property it needed all along.
     """
-    firsts = [f(decimals)[0] for f in DEVIG_METHODS.values()]
-    return max(firsts) - min(firsts)
+    grids = [f(decimals) for f in DEVIG_METHODS.values()]
+    return max(
+        max(g[i] for g in grids) - min(g[i] for g in grids)
+        for i in range(len(decimals))
+    )
 
 
 # --------------------------------------------------------------------------

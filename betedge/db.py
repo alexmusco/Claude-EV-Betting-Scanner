@@ -69,6 +69,10 @@ CREATE TABLE IF NOT EXISTS opportunities (
     ev_max                  REAL,
     kelly_fraction          REAL,
     recommended_stake       REAL,
+    market_tier             TEXT,
+    liquidity               REAL,
+    required_ev             REAL,
+    edge_score              REAL,
     sharp_last_update       TEXT,
     soft_last_update        TEXT,
     suspect                 INTEGER NOT NULL DEFAULT 0,
@@ -103,6 +107,20 @@ CREATE TABLE IF NOT EXISTS bets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bets_status ON bets(status);
+
+-- Every billed API call, so the budget planner can answer "what did I
+-- spend today?". The provider's x-requests-remaining header is the ground
+-- truth for what is LEFT; this is the local record of where it went.
+CREATE TABLE IF NOT EXISTS credit_spend (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT NOT NULL,
+    command     TEXT,
+    detail      TEXT,
+    credits     INTEGER NOT NULL,
+    remaining   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_spend_at ON credit_spend(at);
 
 CREATE TABLE IF NOT EXISTS closing_lines (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,8 +160,50 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        # Migration runs BEFORE the schema script. SCHEMA creates indexes
+        # over columns that an older database may not have yet, and CREATE
+        # INDEX on a missing column is a hard error -- so the columns have to
+        # exist first. On a new database _migrate finds no tables and does
+        # nothing, and the schema script builds everything.
+        self._migrate()
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """
+        Add columns introduced after a database was first created.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing to an existing
+        table, so a database carrying real bet history would otherwise be
+        missing every column added since. Each ALTER is additive and
+        nullable, so old rows stay valid and no data is rewritten.
+
+        PRAGMA table_info on a table that does not exist returns no rows,
+        which is how a brand-new database is recognised and skipped -- an
+        empty result means "absent", not "has no columns".
+        """
+        wanted = {
+            "opportunities": {
+                "market_tier": "TEXT",
+                "liquidity": "REAL",
+                "required_ev": "REAL",
+                "edge_score": "REAL",
+            },
+        }
+        for table, columns in wanted.items():
+            have = {
+                r["name"]
+                for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if not have:
+                # No rows means the table does not exist yet, not that it has
+                # no columns. The schema script below will create it complete.
+                continue
+            for name, decl in columns.items():
+                if name not in have:
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {decl}"
+                    )
 
     def close(self) -> None:
         self.conn.close()
@@ -183,7 +243,9 @@ class Database:
             )
             scan_id = cur.lastrowid
             for opp in result.opportunities:
-                self._insert_opportunity(c, scan_id, opp)
+                # Stamp the row id back onto the object so the report can
+                # print the number the `bet` command actually takes.
+                opp.db_id = self._insert_opportunity(c, scan_id, opp)
         return scan_id
 
     @staticmethod
@@ -197,8 +259,9 @@ class Database:
                    fair_prob, fair_price, devig_method, devig_spread,
                    fair_prob_by_method, soft_book, soft_price, american_price, ev,
                    ev_min, ev_max, kelly_fraction, recommended_stake,
+                   market_tier, liquidity, required_ev, edge_score,
                    sharp_last_update, soft_last_update, suspect, flags)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 scan_id, row["scanned_at"], row["sport"], row["event_id"],
                 row["commence_time"], row["home_team"], row["away_team"],
@@ -209,6 +272,8 @@ class Database:
                 row["devig_spread"], row["fair_prob_by_method"], row["soft_book"],
                 row["soft_price"], row["american_price"], row["ev"], row["ev_min"],
                 row["ev_max"], row["kelly_fraction"], row["recommended_stake"],
+                row["market_tier"], row["liquidity"], row["required_ev"],
+                row["edge_score"],
                 row["sharp_last_update"], row["soft_last_update"],
                 int(row["suspect"]), row["flags"],
             ),
@@ -341,6 +406,63 @@ class Database:
                 ),
             )
             return cur.lastrowid
+
+    def record_spend(
+        self,
+        credits: int,
+        command: str | None = None,
+        detail: str | None = None,
+        remaining: int | None = None,
+        at: datetime | None = None,
+    ) -> int | None:
+        """Log what a command cost. Zero-cost runs are not worth a row."""
+        if credits <= 0:
+            return None
+        with self.tx() as c:
+            cur = c.execute(
+                """INSERT INTO credit_spend (at, command, detail, credits, remaining)
+                   VALUES (?,?,?,?,?)""",
+                (
+                    (at or datetime.now(timezone.utc)).isoformat(),
+                    command,
+                    detail,
+                    int(credits),
+                    remaining,
+                ),
+            )
+            return cur.lastrowid
+
+    def spend_between(self, start: datetime, end: datetime) -> int:
+        """
+        Credits logged in a half-open interval.
+
+        Summed in Python rather than SQL because timestamps reach the
+        database in more than one ISO spelling and those do not compare
+        correctly as strings -- the same reason pending_closing_capture
+        filters in Python.
+        """
+        total = 0
+        for r in self.conn.execute(
+            "SELECT at, credits FROM credit_spend"
+        ).fetchall():
+            ts = parse_timestamp(r["at"])
+            if ts is not None and start <= ts < end:
+                total += r["credits"] or 0
+        return total
+
+    def spend_by_day(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Recent daily totals, newest first, for the budget report."""
+        buckets: dict[str, int] = {}
+        for r in self.conn.execute(
+            "SELECT at, credits FROM credit_spend"
+        ).fetchall():
+            ts = parse_timestamp(r["at"])
+            if ts is None:
+                continue
+            key = ts.strftime("%Y-%m-%d")
+            buckets[key] = buckets.get(key, 0) + (r["credits"] or 0)
+        rows = sorted(buckets.items(), reverse=True)[:limit]
+        return [{"day": d, "credits": n} for d, n in rows]
 
     # ------------------------------------------------------------- reading
 

@@ -1,6 +1,8 @@
 """
 Command line interface.
 
+    betedge daily                         the one you want: budgeted scan + shortlist
+    betedge budget                        credits left, and today's allowance
     betedge sports                        list live sport keys and prop coverage
     betedge quota                         check credits (free)
     betedge scan                          run a scan and write a report
@@ -18,9 +20,10 @@ import argparse
 import csv
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+from . import budget as B
 from . import report as R
 from .closing import capture_closing_lines
 from .config import Config
@@ -41,6 +44,39 @@ def build_client(cfg: Config) -> OddsApiClient:
         max_credits_per_scan=cfg.api.max_credits_per_scan,
         min_credits_remaining=cfg.api.min_credits_remaining,
     )
+
+
+def current_budget(cfg: Config, db: Database, client: OddsApiClient | None = None,
+                   now: datetime | None = None) -> B.BudgetStatus:
+    """
+    Today's spending allowance.
+
+    `remaining` comes from the API when we have spoken to it this run,
+    because the provider's own count cannot drift; the local ledger supplies
+    what the header cannot, which is how much of today is already gone.
+    """
+    now = now or datetime.now(timezone.utc)
+    cycle_start, cycle_end = B.cycle_bounds(now, cfg.budget.cycle_day)
+    day_start, day_end = B.day_bounds(now)
+    return B.plan(
+        monthly_credits=cfg.budget.monthly_credits,
+        cycle_day=cfg.budget.cycle_day,
+        reserve=cfg.budget.reserve,
+        burst=cfg.budget.daily_burst,
+        spent_this_cycle=db.spend_between(cycle_start, cycle_end),
+        spent_today=db.spend_between(day_start, day_end),
+        api_remaining=client.quota.remaining if client is not None else None,
+        now=now,
+    )
+
+
+def _log_spend(db: Database, client: OddsApiClient, command: str,
+               detail: str | None = None) -> int:
+    """Record what a command actually cost, straight off the API headers."""
+    spent = client.quota.spent_this_session
+    db.record_spend(spent, command=command, detail=detail,
+                    remaining=client.quota.remaining)
+    return spent
 
 
 # --------------------------------------------------------------------------
@@ -126,6 +162,12 @@ def cmd_scan(cfg: Config, args) -> int:
         result.opportunities = best_per_selection(result.opportunities)
     cap_exposure(result.clean, cfg)
 
+    # Stored first so the '#' column is the opportunity id that
+    # `betedge bet` takes, rather than a position in the printed list.
+    db = Database(cfg.database)
+    scan_id = db.record_scan(result)
+    _log_spend(db, client, "scan", ",".join(result.sports)[:200])
+
     print(R.scan_summary(result))
     print()
     print(R.console_table(result.clean, limit=args.limit))
@@ -133,12 +175,9 @@ def cmd_scan(cfg: Config, args) -> int:
         print("\nSuspect (sanity checks tripped, no stake recommended):")
         print(R.console_table(result.suspect, limit=10))
 
-    db = Database(cfg.database)
-    scan_id = db.record_scan(result)
     print(f"\nLogged as scan #{scan_id}.")
     if result.clean:
-        print("Bet one with:  betedge bet <id> --stake <amount>")
-        print("Opportunity ids are shown by:  betedge show --ids")
+        print("Bet one with:  betedge bet <id> --stake <amount>  (the # column)")
 
     if not args.no_report:
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -147,6 +186,126 @@ def cmd_scan(cfg: Config, args) -> int:
             R.scan_report_html(result, cfg, title=f"Scan {stamp}"),
         )
         print(f"Report: {path}")
+    db.close()
+    return 0
+
+
+def cmd_budget(cfg: Config, args) -> int:
+    db = Database(cfg.database)
+    client = build_client(cfg)
+    try:
+        client.probe_quota()          # free
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not reach the API ({exc}); using the local ledger only.")
+        client = None
+
+    status = current_budget(cfg, db, client)
+    print(status.summary())
+
+    history = db.spend_by_day(limit=args.days)
+    if history:
+        print(f"\nLast {len(history)} day(s) of spending:")
+        widest = max(h["credits"] for h in history) or 1
+        for h in history:
+            bar = "#" * max(1, round(h["credits"] / widest * 34))
+            print(f"  {h['day']}  {h['credits']:>5,}  {bar}")
+    else:
+        print("\nNo spending logged yet.")
+    db.close()
+    return 0
+
+
+def cmd_daily(cfg: Config, args) -> int:
+    """
+    One command for the daily routine.
+
+    Works out what today's credits allow, spends them cheapest-first, prints
+    a shortlist you can act on, and captures closing lines for anything
+    already bet. The intent is that this is the only command you run.
+    """
+    if args.bankroll is not None:
+        cfg.bankroll.amount = args.bankroll
+    if args.min_ev is not None:
+        cfg.model.min_ev = args.min_ev
+
+    db = Database(cfg.database)
+    client = build_client(cfg)
+
+    try:
+        client.probe_quota()          # free, and gives us the real remaining
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: cannot reach the API: {exc}", file=sys.stderr)
+        db.close()
+        return 1
+
+    status = current_budget(cfg, db, client)
+    print(status.summary())
+    print()
+
+    # Closing-line capture comes out of the reserve and runs first, because
+    # props are pulled at kickoff -- a line missed now cannot be recovered
+    # later, whereas a scan can always run again in an hour.
+    if not args.no_close:
+        try:
+            stats = capture_closing_lines(cfg, client, db, window_minutes=args.window)
+            if stats["captured"] or stats["events_checked"]:
+                print(
+                    f"Closing lines: captured {stats['captured']} across "
+                    f"{stats['events_checked']} event(s)."
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Closing-line capture failed: {exc}")
+
+    allowance = status.spendable if cfg.budget.enabled else cfg.api.max_credits_per_scan
+    already = client.quota.spent_this_session
+    scan_allowance = max(0, allowance - already)
+
+    if scan_allowance < 3:
+        print(
+            "\nNo credits left in today's allowance for scanning. "
+            "Nothing else to do -- try again tomorrow, or raise "
+            "budget.daily_burst if today genuinely deserves more."
+        )
+        _log_spend(db, client, "daily", "close-only")
+        db.close()
+        return 0
+
+    # The scan stops itself at the allowance. Budget accounting is per-day,
+    # so this is set from the plan rather than from the static per-scan cap.
+    client.max_credits_per_scan = already + scan_allowance
+    print(f"\nScanning with up to {scan_allowance:,} credits.\n")
+
+    result = scan(cfg, client, max_events_per_sport=args.max_events)
+    result.opportunities = best_per_selection(result.opportunities)
+    cap_exposure(result.clean, cfg)
+
+    # Stored before it is printed, so every row can show the id that
+    # `betedge bet` takes rather than a position in a list.
+    scan_id = db.record_scan(result)
+    _log_spend(db, client, "daily", ",".join(result.sports)[:200])
+
+    print(R.scan_summary(result))
+    print()
+    print(R.shortlist(result.clean, limit=args.limit))
+
+    if result.suspect and not args.hide_suspect:
+        print("\nSuspect -- shown because they are often interesting, but no "
+              "stake is recommended:")
+        print(R.console_table(result.suspect, limit=5))
+
+    print(f"\nScan #{scan_id}. Re-print it any time with:  betedge show")
+
+    if not args.no_report:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        path = R.write_report(
+            Path(cfg.reports_dir) / f"scan_{stamp}.html",
+            R.scan_report_html(result, cfg, title=f"Daily {stamp}"),
+        )
+        print(f"Report: {path}")
+
+    after = current_budget(cfg, db, client)
+    print(f"\n{after.remaining:,} credits left this cycle "
+          f"({after.days_left:.1f} days to go).")
     db.close()
     return 0
 
@@ -239,6 +398,7 @@ def cmd_close(cfg: Config, args) -> int:
     db = Database(cfg.database)
     client = build_client(cfg)
     stats = capture_closing_lines(cfg, client, db, window_minutes=args.window)
+    _log_spend(db, client, "close")
     print(
         f"Checked {stats['events_checked']} events, captured {stats['captured']} "
         f"closing lines, {stats['not_found']} not found, {stats['errors']} errors. "
@@ -318,6 +478,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser(
+        "daily",
+        help="budgeted scan + shortlist + closing lines. The one to run.",
+    )
+    s.add_argument("--limit", type=int, default=12, help="rows in the shortlist")
+    s.add_argument("--bankroll", type=float)
+    s.add_argument("--min-ev", type=float, help="e.g. 0.03 for +3%%")
+    s.add_argument("--max-events", type=int,
+                   help="cap events per sport in the prop pass")
+    s.add_argument("--window", type=float, default=20.0,
+                   help="minutes before start to capture closing lines")
+    s.add_argument("--no-close", action="store_true",
+                   help="skip closing-line capture")
+    s.add_argument("--hide-suspect", action="store_true")
+    s.add_argument("--no-report", action="store_true")
+    s.set_defaults(func=cmd_daily)
+
+    s = sub.add_parser("budget", help="credits left and today's allowance")
+    s.add_argument("--days", type=int, default=14,
+                   help="days of spending history to show")
+    s.set_defaults(func=cmd_budget)
 
     s = sub.add_parser("sports", help="list sport keys and prop coverage")
     s.add_argument("--all", action="store_true", help="include unconfigured sports")

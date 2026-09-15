@@ -25,7 +25,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
-from . import pricing
+from . import liquidity, pricing
 from .config import Config
 from .markets import core_markets_for, estimate_credits, expand_sport_keys, markets_for
 from .oddsapi import CreditBudgetExceeded, OddsApiClient
@@ -87,12 +87,23 @@ class Opportunity:
     kelly_fraction: float
     recommended_stake: float
 
+    # How much this fair price is worth trusting, and what that does to the
+    # bar and the ranking. See liquidity.py for the reasoning.
+    market_tier: str
+    liquidity: float
+    required_ev: float          # the EV bar this market had to clear
+    edge_score: float           # ev * liquidity -- what the report sorts on
+
     sharp_last_update: datetime | None
     soft_last_update: datetime | None
     scanned_at: datetime
 
     suspect: bool = False
     flags: list[str] = field(default_factory=list)
+    #: Set by Database.record_scan once the row exists, so the number shown
+    #: in the report is the number `betedge bet` expects. Without this the
+    #: console numbered rows 1..n and the id was somewhere else entirely.
+    db_id: int | None = None
 
     @property
     def minutes_to_start(self) -> float:
@@ -406,8 +417,25 @@ def evaluate_event(
         evs = [pricing.expected_value(p, q.price) for p in by_method.values()]
         ev_range = (min(evs), max(evs))
 
-        if ev < m.min_ev:
-            reject("below_min_ev")
+        # How far to trust this fair price, and therefore how much edge to
+        # insist on before flagging it. Ranking on raw EV sorts the board by
+        # how likely a number is to be stale rather than by how much money
+        # is on offer; liquidity.py explains the correction.
+        liq = liquidity.assess(
+            market=q.market,
+            overround=over_round,
+            n_outcomes=len(prices),
+            fair_prob=fair_prob,
+            minutes_to_start=minutes_out,
+        )
+        bar = liquidity.required_ev(m.min_ev, liq.score, m.liquidity_ev_penalty)
+
+        if m.min_liquidity > 0 and liq.score < m.min_liquidity:
+            reject("market_too_thin")
+            continue
+
+        if ev < bar:
+            reject("below_min_ev" if liq.score >= 0.80 else "below_liquidity_bar")
             continue
 
         flags: list[str] = []
@@ -475,6 +503,10 @@ def evaluate_event(
                 ev_range=ev_range,
                 kelly_fraction=kelly,
                 recommended_stake=rec_stake,
+                market_tier=liq.tier,
+                liquidity=liq.score,
+                required_ev=bar,
+                edge_score=liquidity.edge_score(ev, liq.score),
                 sharp_last_update=sharp_last_update,
                 soft_last_update=q.last_update,
                 scanned_at=now,
@@ -497,6 +529,19 @@ def _age_minutes(ts: datetime | None, now: datetime) -> float | None:
 # --------------------------------------------------------------------------
 
 
+@dataclass
+class _ScanState:
+    """Mutable tally shared by the two passes of a scan."""
+
+    opportunities: list = field(default_factory=list)
+    rejections: dict = field(default_factory=dict)
+    errors: list = field(default_factory=list)
+    events_scanned: int = 0
+    quotes_seen: int = 0
+    paired: int = 0
+    budget_exhausted: bool = False
+
+
 def scan(
     cfg: Config,
     client: OddsApiClient,
@@ -506,35 +551,126 @@ def scan(
     core_sports: Sequence[str] | None = None,
 ) -> ScanResult:
     """
-    Run a scan.
+    Run a scan: game-level markets first, then player props.
 
-    Two passes with very different economics. Player props (`sports`) cost
-    one call per event per market off the per-event endpoint. Game-level
-    markets (`core_sports`) cost markets x 1 for the entire sport off the
-    bulk endpoint -- roughly fifty times cheaper per opportunity, at the
-    price of thinner edges, because mainlines are where the sharp money
-    concentrates.
+    The two passes have very different economics. Game-level markets
+    (`core_sports`) come off the bulk endpoint and cost markets x 1 for the
+    ENTIRE sport -- three credits buys every moneyline, spread and total on
+    the board. Player props (`sports`) come off the per-event endpoint and
+    cost markets x events, so a single NFL Sunday can run to hundreds.
+
+    Cheap pass first, deliberately. Both passes stop when the credit budget
+    is spent, and whichever runs second is the one that gets truncated. The
+    cheap pass is also the higher-quality one -- mainlines are deep, sharply
+    priced and carry the liquidity scores that survive the sliding EV bar --
+    so spending the last of a budget there and truncating props is the right
+    way round. Running props first, as this did originally, meant a tight
+    budget could burn itself out on the thinnest markets on the board and
+    never reach the best ones.
     """
     now = now or datetime.now(timezone.utc)
     started = now
-    sports = list(sports or cfg.sports)
-    rejections: dict[str, int] = {}
-    opportunities: list[Opportunity] = []
-    errors: list[str] = []
-    events_scanned = quotes_seen = paired = 0
-
+    sports = list(sports if sports is not None else cfg.sports)
+    core_sports = list(core_sports if core_sports is not None else cfg.core_sports)
+    state = _ScanState()
     books = cfg.books.all
-    budget_exhausted = False
 
+    scanned_core = _scan_core_markets(cfg, client, core_sports, books, now, state)
+    if not state.budget_exhausted:
+        _scan_props(cfg, client, sports, books, now, max_events_per_sport, state)
+
+    # Ranked by liquidity-discounted edge, so the top of the list is where
+    # the confidence and the money both are rather than where the number is
+    # most likely to be wrong.
+    state.opportunities.sort(key=lambda o: o.edge_score, reverse=True)
+
+    return ScanResult(
+        started_at=started,
+        finished_at=datetime.now(timezone.utc),
+        sports=sports + [s for s in scanned_core if s not in sports],
+        opportunities=state.opportunities,
+        events_scanned=state.events_scanned,
+        quotes_seen=state.quotes_seen,
+        sharp_markets_paired=state.paired,
+        credits_spent=client.quota.spent_this_session,
+        credits_remaining=client.quota.remaining,
+        rejections=state.rejections,
+        errors=state.errors,
+    )
+
+
+def _scan_core_markets(
+    cfg: Config,
+    client: OddsApiClient,
+    core_sports: Sequence[str],
+    books: Sequence[str],
+    now: datetime,
+    state: _ScanState,
+) -> list[str]:
+    """
+    Game-level markets off the bulk endpoint. Returns the sports actually
+    swept, with any wildcards resolved.
+    """
+    core_sports = list(core_sports)
+    if not core_sports:
+        return []
+
+    if any(p.endswith("*") for p in core_sports):
+        try:
+            live = [s["key"] for s in client.sports()]
+        except Exception as exc:  # noqa: BLE001
+            state.errors.append(f"could not list sports for wildcard expansion: {exc}")
+            live = []
+        core_sports = expand_sport_keys(core_sports, live)
+
+    swept: list[str] = []
+    for sport in core_sports:
+        markets = core_markets_for(sport)
+        try:
+            payloads = client.odds(sport, markets=markets, bookmakers=books)
+        except CreditBudgetExceeded as exc:
+            state.errors.append(str(exc))
+            state.budget_exhausted = True
+            break
+        except Exception as exc:  # noqa: BLE001
+            state.errors.append(f"{sport} (core): {exc}")
+            continue
+
+        swept.append(sport)
+        log.info(
+            "%s: %d events, %d credits for all core markets",
+            sport, len(payloads or []), len(markets),
+        )
+        for payload in payloads or []:
+            state.events_scanned += 1
+            meta, quotes = parse_event_odds(payload)
+            state.quotes_seen += len(quotes)
+            state.paired += len(group_sharp_markets(quotes, cfg.books.sharp))
+            state.opportunities.extend(
+                evaluate_event(meta, quotes, cfg, now=now, rejections=state.rejections)
+            )
+    return swept
+
+
+def _scan_props(
+    cfg: Config,
+    client: OddsApiClient,
+    sports: Sequence[str],
+    books: Sequence[str],
+    now: datetime,
+    max_events_per_sport: int | None,
+    state: _ScanState,
+) -> None:
+    """Player props off the per-event endpoint. Costs markets x events."""
     for sport in sports:
-        if budget_exhausted:
+        if state.budget_exhausted:
             break
         try:
             markets = cfg.markets_for_sport(
                 sport, include_alternate=cfg.model.include_alternate_lines
             )
         except ValueError as exc:
-            errors.append(str(exc))
+            state.errors.append(str(exc))
             continue
         if not markets:
             log.info("%s has no configured prop markets, skipping", sport)
@@ -543,7 +679,7 @@ def scan(
         try:
             events = client.events(sport)
         except Exception as exc:  # noqa: BLE001 - one bad sport must not kill the scan
-            errors.append(f"{sport}: could not list events: {exc}")
+            state.errors.append(f"{sport}: could not list events: {exc}")
             continue
 
         events = _events_in_window(events, now, cfg)
@@ -552,87 +688,31 @@ def scan(
 
         log.info(
             "%s: %d events in window, ~%d credits at most",
-            sport,
-            len(events),
-            estimate_credits(len(events), len(markets), len(books)),
+            sport, len(events), estimate_credits(len(events), len(markets), len(books)),
         )
 
         for event in events:
             try:
                 payload = client.event_odds(sport, event["id"], markets, books)
             except CreditBudgetExceeded as exc:
-                errors.append(str(exc))
+                state.errors.append(str(exc))
                 log.warning("stopping early: %s", exc)
-                budget_exhausted = True
+                state.budget_exhausted = True
                 break
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"{sport}/{event.get('id')}: {exc}")
+                state.errors.append(f"{sport}/{event.get('id')}: {exc}")
                 continue
 
             if not payload:
                 continue
 
-            events_scanned += 1
+            state.events_scanned += 1
             meta, quotes = parse_event_odds(payload)
-            quotes_seen += len(quotes)
-            paired += len(pair_sharp_quotes(quotes, cfg.books.sharp))
-            opportunities.extend(
-                evaluate_event(meta, quotes, cfg, now=now, rejections=rejections)
+            state.quotes_seen += len(quotes)
+            state.paired += len(pair_sharp_quotes(quotes, cfg.books.sharp))
+            state.opportunities.extend(
+                evaluate_event(meta, quotes, cfg, now=now, rejections=state.rejections)
             )
-
-    # ---- game-level markets -------------------------------------------
-    # These come off the bulk endpoint: one call covers every event in the
-    # sport, and costs markets x 1 rather than markets x events. Three
-    # credits for a whole tennis tour or a whole day of baseball.
-    core_sports = list(core_sports if core_sports is not None else cfg.core_sports)
-    if core_sports and not budget_exhausted:
-        if any(p.endswith("*") for p in core_sports):
-            try:
-                live = [s["key"] for s in client.sports()]
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"could not list sports for wildcard expansion: {exc}")
-                live = []
-            core_sports = expand_sport_keys(core_sports, live)
-
-        for sport in core_sports:
-            markets = core_markets_for(sport)
-            try:
-                payloads = client.odds(sport, markets=markets, bookmakers=books)
-            except CreditBudgetExceeded as exc:
-                errors.append(str(exc))
-                break
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{sport} (core): {exc}")
-                continue
-
-            log.info("%s: %d events, %d credits for all core markets",
-                     sport, len(payloads or []), len(markets))
-
-            for payload in payloads or []:
-                events_scanned += 1
-                meta, quotes = parse_event_odds(payload)
-                quotes_seen += len(quotes)
-                paired += len(group_sharp_markets(quotes, cfg.books.sharp))
-                opportunities.extend(
-                    evaluate_event(meta, quotes, cfg, now=now, rejections=rejections)
-                )
-        sports = sports + [s for s in core_sports if s not in sports]
-
-    opportunities.sort(key=lambda o: o.ev, reverse=True)
-
-    return ScanResult(
-        started_at=started,
-        finished_at=datetime.now(timezone.utc),
-        sports=sports,
-        opportunities=opportunities,
-        events_scanned=events_scanned,
-        quotes_seen=quotes_seen,
-        sharp_markets_paired=paired,
-        credits_spent=client.quota.spent_this_session,
-        credits_remaining=client.quota.remaining,
-        rejections=rejections,
-        errors=errors,
-    )
 
 
 def _events_in_window(events: list[dict], now: datetime, cfg: Config) -> list[dict]:
@@ -660,9 +740,9 @@ def best_per_selection(opportunities: Sequence[Opportunity]) -> list[Opportunity
     best: dict[tuple, Opportunity] = {}
     for o in opportunities:
         key = (o.event_id, o.market, o.selection, (o.side or "").lower())
-        if key not in best or o.ev > best[key].ev:
+        if key not in best or o.edge_score > best[key].edge_score:
             best[key] = o
-    return sorted(best.values(), key=lambda o: o.ev, reverse=True)
+    return sorted(best.values(), key=lambda o: o.edge_score, reverse=True)
 
 
 def total_exposure(opportunities: Sequence[Opportunity]) -> float:

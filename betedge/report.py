@@ -74,13 +74,15 @@ def console_table(opportunities: Sequence[Opportunity], limit: int = 40) -> str:
     if not opportunities:
         return "No opportunities cleared the thresholds."
 
-    headers = ["#", "EV", "Bet", "Market", "Book", "Price", "Fair", "Stake", "Game", "Starts", "Flags"]
+    headers = ["#", "EV", "Liq", "Bet", "Market", "Book", "Price", "Fair", "Stake",
+               "Game", "Starts", "Flags"]
     rows = []
     for i, o in enumerate(opportunities[:limit], 1):
         rows.append(
             [
-                str(i),
+                str(o.db_id if getattr(o, "db_id", None) else i),
                 f"{o.ev:+.1%}",
+                _liquidity_label(getattr(o, "liquidity", None)),
                 o.description,
                 pretty_market(o.market),
                 o.soft_book,
@@ -101,6 +103,61 @@ def console_table(opportunities: Sequence[Opportunity], limit: int = 40) -> str:
     if len(opportunities) > limit:
         more = f"\n\n... and {len(opportunities) - limit} more (use --limit to see them)."
     return f"{line}\n{sep}\n{body}{more}"
+
+
+def _liquidity_label(score) -> str:
+    """
+    Coarse bucket rather than a decimal. The score is a rough confidence
+    estimate built from proxies, and printing it to two places would imply
+    a precision it does not have.
+    """
+    if score is None:
+        return "-"
+    if score >= 0.80:
+        return "deep"
+    if score >= 0.60:
+        return "good"
+    if score >= 0.40:
+        return "thin"
+    return "v.thin"
+
+
+def shortlist(opportunities: Sequence[Opportunity], limit: int = 12) -> str:
+    """
+    The daily view: what to bet, at what price, for how much.
+
+    Deliberately narrower than console_table. The point of a daily run is a
+    list you act on in a few minutes before the prices move, so it carries
+    only what you need to place the bet and drops the diagnostics.
+    """
+    playable = [o for o in opportunities if o.recommended_stake > 0]
+    if not playable:
+        return "Nothing clears the bar right now."
+
+    out = []
+    header = (
+        f"{'id':>3}  {'EV':>6}  {'liq':<6} {'bet':<38} {'price':>14} "
+        f"{'stake':>7}  game"
+    )
+    out.append(header)
+    out.append("-" * len(header))
+    for i, o in enumerate(playable[:limit], 1):
+        price = f"{o.soft_price:.2f} ({american(o.soft_price)})"
+        ident = o.db_id if getattr(o, "db_id", None) else i
+        out.append(
+            f"{ident:>3}  {o.ev:>+5.1%}  {_liquidity_label(o.liquidity):<6} "
+            f"{o.description:<38.38} {price:>14} "
+            f"{o.recommended_stake:>7,.0f}  "
+            f"{o.matchup[:40]} ({_relative(o.commence_time, o.scanned_at)})"
+        )
+    total = sum(o.recommended_stake for o in playable[:limit])
+    out.append("")
+    out.append(
+        f"{len(playable)} playable, showing {min(limit, len(playable))}. "
+        f"Total recommended stake {total:,.0f}."
+    )
+    out.append("The id column is what `betedge bet <id> --stake <amount>` takes.")
+    return "\n".join(out)
 
 
 def scan_summary(result: ScanResult) -> str:

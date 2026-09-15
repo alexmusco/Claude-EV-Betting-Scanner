@@ -85,6 +85,19 @@ class ModelConfig:
 
     include_alternate_lines: bool = False
 
+    # How much extra edge to demand from a thin market. The bar becomes
+    #     min_ev * (1 + penalty * (1 - liquidity))
+    # so at the default 1.5 a deep market is flagged at +2%, a player prop
+    # at roughly +3%, and an alternate line has to show about +4.5%. This is
+    # not caution for its own sake: the fair probability is an estimate, and
+    # in a thin market its error is comparable to the edge being claimed.
+    # Set to 0 for a single flat bar across every market.
+    liquidity_ev_penalty: float = 1.5
+
+    # Refuse to flag anything below this liquidity score at all, whatever
+    # its EV. 0 disables the floor.
+    min_liquidity: float = 0.0
+
 
 @dataclass
 class BankrollConfig:
@@ -102,11 +115,34 @@ class BankrollConfig:
 
 
 @dataclass
+class BudgetConfig:
+    """
+    Monthly credit plan. The per-scan ceiling in ApiConfig stops one runaway
+    call; this stops the slower failure of spending three weeks of quota in
+    four days. See budget.py.
+    """
+
+    # Credits your plan gives you each month.
+    monthly_credits: int = 20000
+    # Day of the month the plan renews. Leave at 1 if you do not know.
+    cycle_day: int = 1
+    # Held back so closing-line capture is never starved by scanning. CLV is
+    # the only fast evidence that the model works, so it gets paid first.
+    reserve: int = 800
+    # A day may spend this multiple of the even daily pace, letting an NFL
+    # Sunday borrow from a quiet Tuesday. Above 1.0 and below about 4.
+    daily_burst: float = 2.0
+    # Set false to let scans run unthrottled and use only the per-scan cap.
+    enabled: bool = True
+
+
+@dataclass
 class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     books: BooksConfig = field(default_factory=BooksConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     bankroll: BankrollConfig = field(default_factory=BankrollConfig)
+    budget: BudgetConfig = field(default_factory=BudgetConfig)
     # Sports scanned for PLAYER PROPS. Expensive: one call per event per
     # market off the per-event endpoint.
     sports: list[str] = field(
@@ -138,6 +174,7 @@ class Config:
             books=BooksConfig(**raw.get("books", {})),
             model=ModelConfig(**raw.get("model", {})),
             bankroll=BankrollConfig(**raw.get("bankroll", {})),
+            budget=BudgetConfig(**raw.get("budget", {})),
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
             prop_markets=raw.get("prop_markets", {}) or {},

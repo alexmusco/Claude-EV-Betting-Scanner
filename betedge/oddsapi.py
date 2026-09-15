@@ -52,7 +52,12 @@ class Quota:
             except (TypeError, ValueError):
                 return None
 
-        self.remaining = _int("x-requests-remaining") or self.remaining
+        # `or` would be wrong here: a remaining count of exactly 0 is
+        # falsy, so the old value survived and the budget floor never
+        # tripped at the one moment it matters most.
+        remaining = _int("x-requests-remaining")
+        if remaining is not None:
+            self.remaining = remaining
         used = _int("x-requests-used")
         if used is not None:
             self.used = used
@@ -74,6 +79,8 @@ class OddsApiClient:
     min_credits_remaining: int = 0
     quota: Quota = field(default_factory=Quota)
     session: requests.Session = field(default_factory=requests.Session)
+    #: Market keys this API rejected, skipped on later calls this session.
+    _bad_markets: set[str] = field(default_factory=set)
 
     # ---------------------------------------------------------------- core
 
@@ -225,22 +232,68 @@ class OddsApiClient:
 
         Returns None rather than raising when the event has no such markets,
         which is common and not an error worth aborting a scan over.
+
+        One unsupported market key in the list makes the API reject the
+        whole request with a 422, which used to lose every market for that
+        event -- and, because the market list is the same for every event in
+        the sport, for the entire slate. A rejected call is not billed, so
+        when the error names the offending keys we drop them and retry once.
+        The bad keys are remembered for the rest of the session so the
+        second event does not repeat the mistake.
         """
+        wanted = [m for m in markets if m not in self._bad_markets]
+        if not wanted:
+            return None
         try:
-            return self._get(
-                f"/sports/{sport}/events/{event_id}/odds",
-                {
-                    "markets": ",".join(markets),
-                    "bookmakers": ",".join(bookmakers),
-                    "oddsFormat": odds_format,
-                    "dateFormat": "iso",
-                },
-            )
+            return self._event_odds_call(sport, event_id, wanted, bookmakers, odds_format)
         except CreditBudgetExceeded:
             raise
         except OddsApiError as exc:
+            offenders = self._markets_named_in(str(exc), wanted)
+            if offenders:
+                self._bad_markets.update(offenders)
+                retry = [m for m in wanted if m not in offenders]
+                log.warning(
+                    "%s rejected market(s) %s; retrying without them",
+                    sport, ",".join(sorted(offenders)),
+                )
+                if not retry:
+                    return None
+                try:
+                    return self._event_odds_call(
+                        sport, event_id, retry, bookmakers, odds_format
+                    )
+                except CreditBudgetExceeded:
+                    raise
+                except OddsApiError as exc2:
+                    log.warning("no odds for event %s: %s", event_id, exc2)
+                    return None
             log.warning("no odds for event %s: %s", event_id, exc)
             return None
+
+    def _event_odds_call(
+        self,
+        sport: str,
+        event_id: str,
+        markets: Sequence[str],
+        bookmakers: Sequence[str],
+        odds_format: str,
+    ) -> dict | None:
+        return self._get(
+            f"/sports/{sport}/events/{event_id}/odds",
+            {
+                "markets": ",".join(markets),
+                "bookmakers": ",".join(bookmakers),
+                "oddsFormat": odds_format,
+                "dateFormat": "iso",
+            },
+        )
+
+    @staticmethod
+    def _markets_named_in(message: str, markets: Sequence[str]) -> set[str]:
+        """Which of the requested market keys the error message mentions."""
+        lowered = message.lower()
+        return {m for m in markets if m.lower() in lowered}
 
     # ------------------------------------------------------------- helpers
 
