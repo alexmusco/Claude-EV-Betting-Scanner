@@ -1,0 +1,106 @@
+# betedge configuration
+# Everything here can be overridden per-run with CLI flags.
+
+api:
+  base_url: https://api.the-odds-api.com/v4
+  key_env: ODDS_API_KEY        # the key itself lives in .env, never in here
+  timeout_seconds: 20
+  max_retries: 3
+
+  # Stop a scan rather than drop below this many credits, so a runaway
+  # loop cannot burn a month's quota in one night.
+  min_credits_remaining: 100
+  # Hard ceiling on what a single scan may spend.
+  max_credits_per_scan: 600
+
+  # Seconds to reuse a cached API response. Keep at 0 for live scanning.
+  # Set to 300 while you are tinkering so reruns cost nothing.
+  cache_seconds: 0
+  cache_dir: data/cache
+
+books:
+  sharp: pinnacle
+  soft:
+    - draftkings
+    - underdog
+
+model:
+  # How to strip Pinnacle's margin out of its prices.
+  #   multiplicative - proportional to each side's raw probability
+  #   additive       - equal absolute share (identical to shin on two-way markets)
+  #   shin           - insider-trading model; matters on three-way soccer markets
+  #   power          - solves sum(q^k)=1; least generous to longshots
+  #   worst_case     - the lowest fair probability any method gives
+  #
+  # worst_case is the default on purpose. On near-even props the methods agree
+  # to within half a point, but on lopsided ones they disagree enormously --
+  # a 1.05/9.50 market puts the longshot at 9.9% (multiplicative) or 5.9%
+  # (power). Taking the lowest means a bet only clears the bar if it clears it
+  # on every method.
+  devig_method: worst_case
+
+  min_ev: 0.02                 # flag at +2% expected value or better
+  max_plausible_ev: 0.15       # above this, mark suspect instead of recommending
+
+  min_overround: 0.005         # sanity bounds on Pinnacle's own margin
+  max_overround: 0.15
+  max_devig_spread: 0.04       # skip when the de-vig methods disagree too much
+
+  max_soft_staleness_minutes: 20
+  max_sharp_staleness_minutes: 20
+
+  min_minutes_to_start: 5      # too late to get a bet down inside this
+  max_hours_to_start: 72
+
+  # Alternate lines carry the biggest apparent edges and the most stale
+  # prices. Turn on once you trust the main markets.
+  include_alternate_lines: false
+
+bankroll:
+  amount: 1000                 # set this to what you are willing to lose
+  kelly_multiplier: 0.25       # quarter Kelly
+  max_fraction: 0.02           # never more than 2% of bankroll on one bet
+  min_stake: 5
+  round_to: 5
+  max_total_exposure_fraction: 0.15   # cap on everything live at once
+
+# PLAYER PROPS. Expensive: one call per event per market.
+# An NFL Sunday across 13 markets is ~180 credits; MLB across 10 is ~150/day.
+sports:
+  - americanfootball_nfl
+  # - basketball_nba        # season starts late October
+  # - icehockey_nhl         # season starts October
+  - baseball_mlb            # narrowed below to two markets
+  # - soccer_epl            # thin Pinnacle prop coverage; see markets.py notes
+
+# GAME-LEVEL MARKETS: moneyline, spreads, totals.
+# Cheap. Cost is markets x 1 for the ENTIRE sport, not per event, so one
+# sweep of every match on the board is 3 credits. Roughly fifty times
+# cheaper per opportunity than props -- at the price of thinner edges,
+# since mainlines are where the sharp money concentrates.
+#
+# A trailing '*' matches by prefix. Tennis publishes one sport key per
+# tournament and they rotate weekly, so 'tennis_*' is the only maintainable
+# way to say "all tennis".
+core_sports:
+  - "tennis_*"
+  - baseball_mlb            # moneyline, run line and totals for every game: 3 credits
+  # - mma_mixed_martial_arts
+  # - soccer_epl            # three-way market; the draw is handled
+
+# Narrow the prop markets for a sport. Cost is markets x events, so cutting
+# MLB from ten markets to two takes a full-slate scan from ~150 credits to
+# ~30. Sports not listed here use the full set from markets.py.
+#
+# Pitcher strikeouts and batter total bases are the usual hunting ground:
+# heavily bet, so Pinnacle prices them carefully, but slow to move at the
+# soft books when a lineup or a park factor changes.
+prop_markets:
+  baseball_mlb:
+    - pitcher_strikeouts
+    - batter_total_bases
+    # - batter_hits
+    # - batter_rbis
+
+database: data/betedge.db
+reports_dir: reports
