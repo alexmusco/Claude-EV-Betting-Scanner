@@ -59,6 +59,7 @@ import numpy as np
 import yaml
 
 from . import copula
+from .rosters import SOURCE_STRUCTURAL
 
 log = logging.getLogger(__name__)
 
@@ -218,13 +219,21 @@ def _norm_name(value: str | None) -> str:
 
 def relation_between(a, b) -> str:
     """
-    How two legs relate, from whatever the payloads actually tell us.
+    How two legs relate, from whatever is actually known.
 
-    The Odds API does not say which team a player plays for. Without a
-    roster (see `load_rosters`) two players in one game cannot be told
-    apart as team mates or opponents, so the pair degrades to `same_game`
-    and is flagged as such rather than guessed at. That is the whole
-    reason this returns `same_game` at all.
+    The Odds API does not say which team a player plays for, so the team
+    on a leg comes from `rosters.py` -- a roster feed, the game logs being
+    fitted, the user's override file, or an inference from the slate
+    itself. Where it is not known the pair degrades to `same_game` rather
+    than being guessed at, which is the whole reason this returns
+    `same_game` at all.
+
+    Two teams are only compared when they are drawn from the same LABEL
+    SPACE. A structural inference names its sides `evt#A` and `evt#B` --
+    true statements about one game and meaningless outside it -- so
+    comparing one against a real club would read as "different team" and
+    report a confident relation that nothing supports. Mixing them is
+    refused instead.
     """
     if a.event_id != b.event_id:
         return CROSS_GAME
@@ -232,39 +241,12 @@ def relation_between(a, b) -> str:
         return SAME_PLAYER
     team_a, team_b = _norm_name(getattr(a, "team", None)), _norm_name(getattr(b, "team", None))
     if team_a and team_b:
+        inferred_a = getattr(a, "team_source", None) == SOURCE_STRUCTURAL
+        inferred_b = getattr(b, "team_source", None) == SOURCE_STRUCTURAL
+        if inferred_a != inferred_b:
+            return SAME_GAME
         return SAME_TEAM if team_a == team_b else OPPOSING_TEAM
     return SAME_GAME
-
-
-def load_rosters(path: str | Path) -> dict[str, str]:
-    """
-    Map player name -> team, so same-team and opposing-team relations can
-    be told apart.
-
-    The Odds API carries no team for a player prop, and the most useful
-    priors in the file -- a quarterback with his own receiver, two backs
-    splitting carries -- are precisely the ones that need it. So the user
-    supplies a roster. Accepted as CSV with `player,team` columns (an
-    optional `position` column is read and ignored for now), or as YAML
-    mapping names to teams.
-
-    Nothing is shipped: a roster goes stale within a week, and a stale one
-    would silently apply the wrong sign to a real ticket.
-    """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"no roster file at {p}")
-    if p.suffix.lower() in (".yaml", ".yml"):
-        raw = yaml.safe_load(p.read_text()) or {}
-        return {_norm_name(k): str(v) for k, v in raw.items()}
-    out: dict[str, str] = {}
-    with p.open(newline="", encoding="utf-8") as fh:
-        for row in csv.DictReader(fh):
-            name = row.get("player") or row.get("name")
-            team = row.get("team")
-            if name and team:
-                out[_norm_name(name)] = team.strip()
-    return out
 
 
 # --------------------------------------------------------------------------

@@ -518,6 +518,44 @@ def parlay_console(tickets: Sequence, limit: int = 12, title: str = "") -> str:
     return "\n".join(out)
 
 
+def roster_note(result, cfg: Config) -> str:
+    """
+    One line on how much of the slate had a known club.
+
+    Worth printing on every scan, because the cost of missing rosters is
+    invisible otherwise: every leg without a team silently drops from the
+    sharp same-team prior to the weaker blended one, and the EV just comes
+    out a little lower with nothing to say why.
+    """
+    book = getattr(result, "rosters", None)
+    lines = []
+    refresh = getattr(result, "roster_refresh", None)
+    if refresh is not None:
+        for sport, n in sorted(refresh.refreshed.items()):
+            lines.append(f"Rosters: refreshed {n:,} players for {sport}.")
+        for error in refresh.errors:
+            lines.append(f"Rosters: {error}")
+
+    legs = [leg for t in result.tickets for leg in t.legs]
+    if legs:
+        known = sum(1 for leg in legs if leg.team)
+        inferred = sum(1 for leg in legs if leg.team_source == "structural")
+        if known == 0:
+            lines.append(
+                f"Rosters: no club known for any of the {len(legs)} ticket legs, "
+                "so every same-game pair used the blended priors. "
+                "`betedge parlay rosters` says why."
+            )
+        else:
+            detail = f"Rosters: {known}/{len(legs)} ticket legs have a known club"
+            if inferred:
+                detail += f" ({inferred} inferred from the slate)"
+            if book is not None and book.rejected_stale:
+                detail += f"; {book.rejected_stale} entries dropped as stale"
+            lines.append(detail + ".")
+    return "\n".join(lines)
+
+
 def sorted_by_ev(tickets: Sequence) -> list:
     """Expected value first. Never the payout multiple."""
     return sorted(tickets, key=lambda t: t.ev, reverse=True)
@@ -586,10 +624,18 @@ def _leg_rows(ticket) -> str:
             if leg.line_source != "exact"
             else ""
         )
+        if leg.team:
+            team = (
+                f"{_esc(leg.team)} "
+                f"<span class='dim'>{_esc(leg.team_source or '')}</span>"
+            )
+        else:
+            team = '<span class="dim">unknown</span>'
         rows.append(
             f"<tr><td class='bet'>{_esc(leg.description)}</td>"
             f"<td class='dim'>{_esc(pretty_market(leg.market))}</td>"
             f"<td class='dim'>{_esc(leg.matchup)}</td>"
+            f"<td>{team}</td>"
             f"<td class='num'>{leg.fair_prob:.1%}</td>"
             f"<td class='num'>{push}</td>"
             f"<td class='num'>{leg.hit_prob:.1%}</td>"
@@ -598,7 +644,7 @@ def _leg_rows(ticket) -> str:
             f"<td class='dim'>{_esc(leg.book)} {line_note}</td></tr>"
         )
     return f"""<table class="inner">
-<thead><tr><th>Leg</th><th>Market</th><th>Game</th>
+<thead><tr><th>Leg</th><th>Market</th><th>Game</th><th>Club</th>
 <th class="num">Pinnacle fair</th><th class="num">Push</th>
 <th class="num">Hits</th><th class="num">Pinnacle o/u</th><th>Book</th></tr></thead>
 <tbody>{''.join(rows)}</tbody></table>"""

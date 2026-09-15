@@ -295,23 +295,6 @@ class TestAssembly:
         assert built.strongest is not None
 
 
-class TestRosters:
-    def test_a_csv_roster_loads(self, tmp_path):
-        p = tmp_path / "r.csv"
-        p.write_text("player,team,position\nPatrick Mahomes,KC,QB\nTravis Kelce,KC,TE\n")
-        rosters = C.load_rosters(p)
-        assert rosters["patrick mahomes"] == "KC"
-
-    def test_a_yaml_roster_loads(self, tmp_path):
-        p = tmp_path / "r.yaml"
-        p.write_text("Patrick Mahomes: KC\nCourtland Sutton: DEN\n")
-        assert C.load_rosters(p)["courtland sutton"] == "DEN"
-
-    def test_a_missing_roster_says_so(self, tmp_path):
-        with pytest.raises(FileNotFoundError):
-            C.load_rosters(tmp_path / "nope.csv")
-
-
 class TestSpearman:
     def test_a_perfect_monotone_relationship_scores_one(self):
         assert C.spearman([1, 2, 3, 4, 5], [10, 20, 30, 40, 50]) == pytest.approx(1.0)

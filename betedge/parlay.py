@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -68,10 +68,11 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 import yaml
 
-from . import copula, correlation, liquidity, pricing
+from . import copula, correlation, liquidity, pricing, rosters as rosters_mod
 from .config import Config
 from .correlation import CorrelationMatrix, EstimateStore, PriorSet
 from .markets import estimate_credits
+from .rosters import SOURCE_STRUCTURAL, RosterBook, infer_sides
 from .oddsapi import CreditBudgetExceeded, OddsApiClient
 from .scan import (
     OVER_NAMES,
@@ -501,7 +502,12 @@ class Leg:
     liquidity: float
     line_source: str = LINE_EXACT
     push_source: str = "half_line"
+    #: The player's club, and where that came from. Carried together on
+    #: purpose: a team with no provenance cannot be aged, and an entry that
+    #: cannot be aged is one the correlation matrix should not trust.
     team: str | None = None
+    team_source: str | None = None
+    team_as_of: str | None = None
     flags: tuple[str, ...] = ()
 
     @property
@@ -708,7 +714,7 @@ def build_legs(
     books: Sequence[str],
     now: datetime | None = None,
     rejections: dict[str, int] | None = None,
-    rosters: dict[str, str] | None = None,
+    rosters: RosterBook | None = None,
 ) -> list[Leg]:
     """
     Every usable leg in one event, for the books named in `books`.
@@ -723,7 +729,6 @@ def build_legs(
     rejections = rejections if rejections is not None else {}
     m = cfg.model
     pc = cfg.parlay
-    rosters = rosters or {}
 
     def reject(reason: str) -> None:
         rejections[reason] = rejections.get(reason, 0) + 1
@@ -833,6 +838,10 @@ def build_legs(
             reject("market_too_thin")
             continue
 
+        known = (
+            rosters.lookup(meta.get("sport") or "", q.selection)
+            if rosters is not None else None
+        )
         leg = Leg(
             sport=meta.get("sport") or "",
             event_id=meta.get("event_id") or "",
@@ -859,13 +868,28 @@ def build_legs(
             liquidity=liq.score,
             line_source=line_source,
             push_source=push_source,
-            team=rosters.get((q.selection or "").strip().lower()),
+            team=known.team if known else None,
+            team_source=known.source if known else None,
+            team_as_of=known.as_of.isoformat() if known and known.as_of else None,
             flags=tuple(leg_flags),
         )
         if leg.identity in seen:
             continue
         seen.add(leg.identity)
         out.append(leg)
+
+    # Last, and only for players still without a club: some markets carry
+    # exactly one player per team, so two of them in one game are
+    # necessarily opponents. That needs no roster and no assumption, and it
+    # is applied after the roster so it can never overwrite a real answer.
+    sides = infer_sides(out)
+    if sides:
+        out = [
+            replace(leg, team=sides[leg.selection], team_source=SOURCE_STRUCTURAL)
+            if not leg.team and leg.selection in sides
+            else leg
+            for leg in out
+        ]
 
     return out
 
@@ -1209,11 +1233,21 @@ def apply_guards(ticket: Ticket, cfg: Config) -> Ticket:
         flags.append("payout_table_unverified")
 
     if all(p.source == correlation.SOURCE_DEFAULT for p in ticket.correlation.pairs):
-        # Not one pair matched a structural prior. Usually this means the
-        # legs' teams are unknown, so every same-game pair fell back to the
-        # weak generic number -- the ticket is being scored as very nearly
-        # independent, which is not what the tool is for.
-        flags.append("no_structural_correlation_matched(supply parlay.rosters_path)")
+        # Not one pair matched a structural prior, so the ticket is being
+        # scored as very nearly independent -- which is not what the tool
+        # is for. Two different causes, and the fix differs, so the flag
+        # says which: either the legs' teams are unknown and every pair
+        # fell back to the generic number, or the teams ARE known and no
+        # prior has been written for this combination of markets.
+        if any(leg.team for leg in ticket.legs):
+            flags.append(
+                "no_prior_for_these_markets(add one to correlation_priors.yaml)"
+            )
+        else:
+            flags.append(
+                "no_structural_correlation_matched(teams unknown; see "
+                "`betedge parlay rosters`)"
+            )
 
     if any(
         p.relation == correlation.SAME_GAME for p in ticket.correlation.pairs
@@ -1567,6 +1601,25 @@ class ParlayScanResult:
     credits_remaining: int | None = None
     rejections: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    rosters: RosterBook | None = None
+    roster_refresh: Any = None
+
+    @property
+    def team_coverage(self) -> dict[str, int]:
+        """
+        How many legs the roster book could actually name a club for.
+
+        The number to watch: a book of nine thousand players that covers
+        none of tonight's starters buys nothing, and every leg it misses
+        falls back to the weaker blended prior.
+        """
+        return {
+            "legs": self.legs_built,
+            "with_team": sum(
+                1 for t in self.tickets for leg in t.legs if leg.team
+            ),
+            "ticket_legs": sum(t.n_legs for t in self.tickets),
+        }
 
     @property
     def clean(self) -> list[Ticket]:
@@ -1581,15 +1634,58 @@ class ParlayScanResult:
         return [t for t in self.clean if t.recommended_stake > 0]
 
 
-def load_context(cfg: Config, db=None) -> tuple[PayoutTable, PriorSet, EstimateStore | None, dict]:
-    """Everything a parlay run needs that does not come from the API."""
+@dataclass
+class ParlayContext:
+    """Everything a parlay run needs that does not come from the odds API."""
+
+    table: PayoutTable
+    priors: PriorSet
+    estimates: EstimateStore | None
+    rosters: RosterBook
+    refresh: rosters_mod.RefreshReport | None = None
+
+
+def load_context(
+    cfg: Config,
+    db=None,
+    sports: Sequence[str] | None = None,
+    refresh: bool | None = None,
+    now: datetime | None = None,
+    opener=None,
+) -> ParlayContext:
+    """
+    Load the payout table, the priors, the fitted correlations and the
+    roster book, refreshing any roster feed that has gone cold.
+
+    The refresh never fails a run. A roster feed is an enrichment -- losing
+    it costs the sharp same-team priors and falls back to the blended
+    ones, which is a smaller loss than not scanning at all.
+    """
+    now = now or datetime.now(timezone.utc)
     table = PayoutTable.load(cfg.parlay.payouts_path)
     priors = PriorSet.load(cfg.parlay.priors_path)
     estimates = EstimateStore.from_db(db) if db is not None else None
-    rosters: dict[str, str] = {}
-    if cfg.parlay.rosters_path:
-        rosters = correlation.load_rosters(cfg.parlay.rosters_path)
-    return table, priors, estimates, rosters
+
+    report = None
+    should_refresh = (
+        cfg.parlay.roster_auto_refresh if refresh is None else refresh
+    )
+    if db is not None and should_refresh and sports:
+        report = rosters_mod.refresh_providers(
+            db, sports,
+            refresh_days=cfg.parlay.roster_refresh_days,
+            now=now, opener=opener,
+        )
+        for error in report.errors:
+            log.warning("roster refresh: %s", error)
+
+    book = rosters_mod.load_book(
+        db,
+        manual_path=cfg.parlay.rosters_path,
+        max_age_days=cfg.parlay.roster_max_age_days,
+        now=now,
+    )
+    return ParlayContext(table, priors, estimates, book, report)
 
 
 def scan_parlays(
@@ -1613,12 +1709,14 @@ def scan_parlays(
     """
     now = now or datetime.now(timezone.utc)
     started = now
-    table, priors, estimates, rosters = load_context(cfg, db)
+    sports = list(sports if sports is not None else cfg.sports)
+    sports, blocked = cfg.allowed(sports)
+
+    context = load_context(cfg, db, sports=sports, now=now)
+    table, priors, estimates = context.table, context.priors, context.estimates
 
     wanted = list(products or cfg.parlay.products)
     chosen = [table.get(key) for key in wanted]
-    sports = list(sports if sports is not None else cfg.sports)
-    sports, blocked = cfg.allowed(sports)
 
     state = ParlayScanResult(
         started_at=started, finished_at=now, sports=sports,
@@ -1688,11 +1786,14 @@ def scan_parlays(
             all_legs.extend(
                 build_legs(
                     meta, quotes, cfg, target_books,
-                    now=now, rejections=state.rejections, rosters=rosters,
+                    now=now, rejections=state.rejections,
+                    rosters=context.rosters,
                 )
             )
 
     state.legs_built = len(all_legs)
+    state.rosters = context.rosters
+    state.roster_refresh = context.refresh
     state.tickets = build_tickets(
         all_legs, chosen, cfg, priors, estimates,
         now=now, state=state, offered_price=offered_price,

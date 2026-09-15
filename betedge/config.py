@@ -134,11 +134,21 @@ class ParlayConfig:
     # Override the shipped data files. None uses what ships with betedge.
     payouts_path: str | None = None
     priors_path: str | None = None
-    # player,team CSV or YAML. Without it, two players in one game cannot
-    # be told apart as team mates or opponents and every same-game pair
-    # falls back to the weak generic prior. Nothing is shipped because a
-    # roster goes stale in a week.
+    # Your own player,team CSV or YAML. Optional, and highest precedence:
+    # on the morning of a trade you know before any feed does. Teams
+    # otherwise come from the game logs you fit correlations from and from
+    # a published roster feed -- see rosters.py.
     rosters_path: str | None = None
+    # Pull a roster feed during a scan when its cached snapshot has gone
+    # cold. Set false to keep a scan's only network call the Odds API, and
+    # refresh by hand with `betedge parlay rosters --refresh`.
+    roster_auto_refresh: bool = True
+    roster_refresh_days: float = 3.0
+    # Past this, a player's team is not used at all. A stale roster is
+    # worse than no roster: an unknown team costs the weak blended prior,
+    # a WRONG team puts a confident +0.45 on a pair that is really -0.10
+    # and nothing downstream questions it.
+    roster_max_age_days: float = 30.0
 
     # Monte Carlo. The seed is fixed so a re-run does not reshuffle the
     # ranking; the standard error is reported rather than hidden.

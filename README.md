@@ -594,13 +594,54 @@ Nothing is inferred from the odds. Backing a correlation out of DK's SGP
 price would make this tool agree with DraftKings by construction, which
 would guarantee it could never find the thing it is looking for.
 
-Because The Odds API does not say which team a player plays for, two
-players in one game cannot be told apart as team mates or opponents
-without help. Supply a roster (`parlay.rosters_path`, or `--rosters`, a
-`player,team` CSV) to get the sharp same-team and opposing-team priors;
-without one the tool falls back to explicitly-labelled same-game blends
-and says so on every ticket. No roster ships, because one goes stale in a
-week and a stale roster puts the wrong sign on a real ticket.
+### Rosters, which you should not have to maintain
+
+The Odds API does not say which team a player plays for, and the sharpest
+priors all need it — a QB with *his own* receiver is +0.45, two backs in
+*the same* backfield are −0.30. Teams come from four layers, and you have
+to do nothing for the first three:
+
+1. **The game logs you already fit correlations from.** They carry a
+   `team` column, because the fitter needs it to bucket pairs — it was
+   simply being read and thrown away. `parlay correlations --from
+   logs.csv` now keeps it, so the command you have to run anyway is the
+   one that keeps your rosters current, and a mid-season trade corrects
+   itself on the next refit.
+2. **A published roster feed**, fetched during a scan once its snapshot
+   has gone cold (`roster_refresh_days`, default 3). NFL is served by
+   nflverse's open data release — a download, not a scrape. A failed
+   fetch never stops a scan; it costs the sharp priors, not the run.
+3. **Inference from the slate itself**, which needs no data at all. Some
+   markets field exactly one player per team, so two of them in one game
+   are necessarily opponents — the two starting quarterbacks, the two
+   starting pitchers, the two goalies. Those labels are event-scoped and
+   are never compared against a real club, because `evt#A` reading as
+   "different team" from `KC` would be a confident answer nothing
+   supports.
+4. **Your own CSV** (`parlay.rosters_path`, or `--rosters`), which
+   overrides all of them, because on the morning of a trade you know
+   before any feed does.
+
+```bash
+betedge parlay rosters                 # coverage, sources, ages, conflicts
+betedge parlay rosters --refresh       # pull the feed now
+betedge parlay rosters --player "Patrick Mahomes"
+```
+
+**A stale roster is worse than no roster.** An unknown team costs you the
+weak blended prior; a wrong team puts a confident +0.45 on a pair that is
+really −0.10, and nothing downstream questions it. So every entry carries
+the date it was true and where it came from, an entry past
+`roster_max_age_days` is dropped rather than quietly used, two players
+sharing a name are left unresolved rather than guessed between, and the
+report names the club and its source on every leg.
+
+That same reasoning rules out the tempting shortcut of having a language
+model write the roster from memory: the answer would be fluent, undated,
+and wrong about every transaction since its training cut-off. When this
+was built, the live feed had Isiah Pacheco on Detroit — a model writing
+from memory would have put him on Kansas City and turned an opponent into
+a team mate.
 
 ### The honesty check that matters most
 
@@ -688,6 +729,7 @@ betedge/
   pricing.py    de-vig, EV, Kelly          ← the maths, heavily tested
   copula.py     Gaussian copula: the joint probability of a multi-leg ticket
   correlation.py structural priors, fitted estimates, matrix assembly
+  rosters.py    who plays for whom, and how much to trust that answer
   parlay.py     pick'em and parlay tickets: legs, guards, search, staking
   liquidity.py  how far to trust a fair price, and what edge to demand
   budget.py     monthly credit pacing
@@ -702,7 +744,8 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          520 tests; no network, no credits spent
+tests/          612 tests; no network, no credits spent
+                (enforced: requests is blocked for the whole suite)
 ```
 
 ```bash
@@ -729,7 +772,8 @@ pytest
 | `bet export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |
 | `bet parlay verify-payouts` | free | Print the payout ladders. **Read this before trusting any ticket EV.** |
 | `bet parlay coverage` | ~1/event | Which sports have usable two-sided Pinnacle prop coverage |
-| `bet parlay correlations` | free | Fit pairwise correlations from your game logs, and show what is stored |
+| `bet parlay correlations` | free | Fit pairwise correlations from your game logs — and learn rosters from the same file |
+| `bet parlay rosters` | free | Who plays for whom, where it came from, how stale it is. `--refresh` pulls the feed |
 | `bet parlay scan` | budgeted | Build and rank multi-leg tickets |
 | `bet parlay bet <id> --stake N` | free | Log an entry you placed |
 | `bet parlay settle <id> --hit K` | free | Settle it by how many legs landed |

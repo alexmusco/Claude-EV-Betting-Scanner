@@ -247,6 +247,30 @@ CREATE TABLE IF NOT EXISTS parlay_closing_lines (
 
 CREATE INDEX IF NOT EXISTS idx_pcl_ticket ON parlay_closing_lines(ticket_id);
 
+-- Who plays for whom. Populated from the game logs already being fitted,
+-- from a published roster feed, and from the user's own override file.
+--
+-- Rows are stored as a SNAPSHOT per (sport, source) and replaced wholesale
+-- on refresh, never accumulated. A traded player who left a row behind on
+-- his old club would read as one name on two teams, which the resolver
+-- treats as two different players sharing a name and refuses to answer for
+-- -- turning a correct update into a silent loss of coverage.
+CREATE TABLE IF NOT EXISTS rosters (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sport       TEXT NOT NULL,
+    player      TEXT NOT NULL,
+    player_key  TEXT NOT NULL,
+    exact_key   TEXT NOT NULL,
+    team        TEXT NOT NULL,
+    position    TEXT,
+    source      TEXT NOT NULL,
+    as_of       TEXT,
+    fetched_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_roster_key    ON rosters(sport, player_key);
+CREATE INDEX IF NOT EXISTS idx_roster_source ON rosters(sport, source);
+
 -- Pairwise correlations fitted from game logs the user supplied. The
 -- sample size is stored because it is what decides whether the number is
 -- used at all -- an estimate from 12 joint observations is not an
@@ -784,6 +808,64 @@ class Database:
                 )
                 written += 1
         return written
+
+    # -------------------------------------------------------------- rosters
+
+    def replace_rosters(self, sport: str, source: str, entries) -> int:
+        """
+        Swap in a fresh snapshot for one (sport, source), atomically.
+
+        Delete-then-insert rather than upsert, because a roster feed is a
+        statement about the whole league at a moment, not a stream of
+        corrections. Upserting would leave a traded player on both clubs.
+        """
+        rows = list(entries)
+        with self.tx() as c:
+            c.execute(
+                "DELETE FROM rosters WHERE sport=? AND source=?", (sport, source)
+            )
+            c.executemany(
+                """INSERT INTO rosters (sport, player, player_key, exact_key,
+                       team, position, source, as_of, fetched_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        e.sport or sport, e.player, e.player_key, e.exact_key,
+                        e.team, e.position, e.source,
+                        e.as_of.isoformat() if e.as_of else None,
+                        (e.fetched_at or datetime.now(timezone.utc)).isoformat(),
+                    )
+                    for e in rows
+                ],
+            )
+        return len(rows)
+
+    def roster_rows(self, sport: str | None = None) -> list[sqlite3.Row]:
+        if sport:
+            return self.conn.execute(
+                "SELECT * FROM rosters WHERE sport=?", (sport,)
+            ).fetchall()
+        return self.conn.execute("SELECT * FROM rosters").fetchall()
+
+    def roster_freshness(self) -> dict[tuple[str, str], dict[str, Any]]:
+        """
+        Per (sport, source): how many players, and when it was last pulled.
+
+        This is what the refresh timer reads. It asks when the snapshot was
+        FETCHED, not how old the players are, because those are different
+        questions -- a feed pulled an hour ago is current even if it is
+        reporting a roster that has not changed in a month.
+        """
+        out: dict[tuple[str, str], dict[str, Any]] = {}
+        for r in self.conn.execute(
+            """SELECT sport, source, COUNT(*) AS n, MAX(fetched_at) AS last
+               FROM rosters GROUP BY sport, source"""
+        ).fetchall():
+            out[(r["sport"], r["source"])] = {
+                "players": r["n"],
+                "fetched_at": parse_timestamp(r["last"]),
+            }
+        return out
 
     def correlation_estimates(self) -> list[sqlite3.Row]:
         return self.conn.execute(

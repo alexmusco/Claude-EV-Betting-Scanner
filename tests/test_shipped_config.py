@@ -248,3 +248,43 @@ class TestShippedDataFiles:
 
         for relation, rho in PriorSet.load().defaults.items():
             assert abs(rho) <= 0.25, relation
+
+
+class TestRosterSection:
+    def test_the_staleness_guard_is_on_and_sane(self, cfg):
+        """
+        A stale roster is worse than none, so this has to be finite and
+        short enough to matter. Disabling it by setting a huge number would
+        turn every old mapping into a confident wrong sign.
+        """
+        assert 1 <= cfg.parlay.roster_max_age_days <= 120
+
+    def test_the_feed_is_refreshed_more_often_than_entries_expire(self, cfg):
+        assert cfg.parlay.roster_refresh_days < cfg.parlay.roster_max_age_days
+
+    def test_a_roster_path_if_set_is_not_the_shipped_data_directory(self, cfg):
+        # The override is the user's own file; pointing it inside the
+        # package would have it wiped by the next install.
+        if cfg.parlay.rosters_path:
+            assert "betedge/data" not in cfg.parlay.rosters_path.replace("\\", "/")
+
+    def test_every_league_with_a_feed_is_one_we_verified(self):
+        from betedge import rosters as R
+
+        assert set(R.PROVIDERS) == {"americanfootball_nfl"}
+        assert R.provider_name("baseball_mlb") is None
+
+    def test_the_one_per_team_markets_really_are_one_per_team(self):
+        """
+        The structural inference is only sound for markets where a team
+        fields exactly one player. A receiving market here would pair two
+        team mates as opponents and invert the sign.
+        """
+        from betedge import rosters as R
+
+        for market in R.ONE_PER_TEAM_MARKETS:
+            assert (
+                market.startswith("pitcher_")
+                or market.startswith("player_pass_")
+                or market == "player_total_saves"
+            ), market

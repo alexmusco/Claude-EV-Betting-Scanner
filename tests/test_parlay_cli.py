@@ -7,7 +7,7 @@ of a command can be asserted rather than hoped for.
 """
 
 import sys
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,9 +18,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from conftest import NOW, FakeClient
 from fixtures import KC_STACK, make_leg, parlay_config, prop_event
 
-from betedge import cli, correlation as C, parlay as P
+from betedge import cli, correlation as C, parlay as P, rosters as rosters_mod
 from betedge.closing import capture_parlay_closing_lines
 from betedge.db import Database
+from betedge.rosters import RosterEntry, load_book
 
 
 @pytest.fixture
@@ -40,6 +41,7 @@ def wired(monkeypatch, tmp_path):
         "parlay": {
             "products": ["underdog_standard"],
             "draws": 20000, "search_draws": 4000, "beam_width": 8,
+            "roster_auto_refresh": False,
         },
     }))
     client = FakeClient(
@@ -563,3 +565,200 @@ class TestParlayClosingLines:
         self.scanned(cfg_path, tmp_path).close()
         run(["--config", str(cfg_path), "close", "--window", "600", "--no-parlays"])
         assert "Tickets:" not in capsys.readouterr().out
+
+
+class TestRostersCommand:
+    def test_it_says_what_to_do_when_nothing_is_known(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        assert run(["--config", str(cfg_path), "parlay", "rosters"]) == 0
+        out = capsys.readouterr().out
+        assert "No rosters usable" in out
+        assert "correlations --from" in out
+        assert "rosters --refresh" in out
+
+    def test_it_reports_what_is_stored(self, wired, tmp_path, capsys):
+        cfg_path, _client, tmp_path = wired
+        db = Database(tmp_path / "t.db")
+        db.replace_rosters("americanfootball_nfl", "nflverse", [
+            RosterEntry(sport="americanfootball_nfl", player="Patrick Mahomes",
+                        team="KC", source="nflverse",
+                        as_of=datetime.now(timezone.utc).date()),
+        ])
+        db.close()
+        run(["--config", str(cfg_path), "parlay", "rosters"])
+        out = capsys.readouterr().out
+        assert "americanfootball_nfl" in out
+        assert "nflverse" in out
+
+    def test_it_looks_up_a_named_player_with_provenance(self, wired, tmp_path, capsys):
+        cfg_path, _client, tmp_path = wired
+        db = Database(tmp_path / "t.db")
+        db.replace_rosters("americanfootball_nfl", "nflverse", [
+            RosterEntry(sport="americanfootball_nfl", player="Patrick Mahomes",
+                        team="KC", source="nflverse",
+                        as_of=datetime.now(timezone.utc).date()),
+        ])
+        db.close()
+        run(["--config", str(cfg_path), "parlay", "rosters",
+             "--player", "Patrick Mahomes", "Nobody At All"])
+        out = capsys.readouterr().out
+        assert "KC (nflverse" in out
+        assert "Nobody At All: unknown" in out
+
+    def test_a_stale_entry_is_reported_as_dropped(self, wired, tmp_path, capsys):
+        cfg_path, _client, tmp_path = wired
+        db = Database(tmp_path / "t.db")
+        db.replace_rosters("americanfootball_nfl", "nflverse", [
+            RosterEntry(sport="americanfootball_nfl", player="Ghost", team="KC",
+                        source="nflverse", as_of=date(2020, 1, 1)),
+        ])
+        db.close()
+        run(["--config", str(cfg_path), "parlay", "rosters"])
+        out = capsys.readouterr().out
+        assert "stale roster is" in out
+
+    def test_it_costs_no_odds_api_credits(self, wired):
+        cfg_path, client, _tmp = wired
+        run(["--config", str(cfg_path), "parlay", "rosters"])
+        assert client.quota.spent_this_session == 0
+
+
+class TestRostersFromGameLogs:
+    def write_logs(self, tmp_path, n=120):
+        logs = tmp_path / "logs.csv"
+        rows = ["game_id,sport,player,team,market,value,date"]
+        for i in range(n):
+            rows.append(
+                f"g{i},americanfootball_nfl,Patrick Mahomes,KC,"
+                f"player_pass_yds,{250 + i},2026-09-{(i % 28) + 1:02d}"
+            )
+            rows.append(
+                f"g{i},americanfootball_nfl,Travis Kelce,KC,"
+                f"player_reception_yds,{60 + i},2026-09-{(i % 28) + 1:02d}"
+            )
+        logs.write_text("\n".join(rows) + "\n")
+        return logs
+
+    def test_fitting_correlations_also_learns_the_rosters(self, wired, tmp_path, capsys):
+        cfg_path, _client, tmp_path = wired
+        logs = self.write_logs(tmp_path)
+        run(["--config", str(cfg_path), "parlay", "correlations", "--from", str(logs)])
+        out = capsys.readouterr().out
+        assert "Learned" in out and "player/team mapping" in out
+
+        db = Database(tmp_path / "t.db")
+        book = load_book(db)
+        assert book.team_for("americanfootball_nfl", "Patrick Mahomes") == "KC"
+        assert book.team_for("americanfootball_nfl", "Travis Kelce") == "KC"
+        db.close()
+
+    def test_those_rosters_then_reach_a_scan(self, wired, tmp_path, capsys):
+        cfg_path, _client, tmp_path = wired
+        logs = self.write_logs(tmp_path)
+        run(["--config", str(cfg_path), "parlay", "correlations", "--from", str(logs)])
+        capsys.readouterr()
+
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        out = capsys.readouterr().out
+        assert "ticket legs have a known club" in out
+
+        db = Database(tmp_path / "t.db")
+        teams = {
+            leg["selection"]: leg["team"]
+            for ticket in db.latest_parlay_tickets(50)
+            for leg in db.parlay_legs(ticket["id"])
+        }
+        db.close()
+        # The two players the logs covered carry their club; the two they
+        # did not are left unknown rather than guessed at.
+        assert teams["Patrick Mahomes"] == "KC"
+        assert teams["Travis Kelce"] == "KC"
+        assert teams["Rashee Rice"] is None
+
+    def test_a_refit_corrects_a_trade(self, wired, tmp_path):
+        cfg_path, _client, tmp_path = wired
+        logs = self.write_logs(tmp_path)
+        run(["--config", str(cfg_path), "parlay", "correlations", "--from", str(logs)])
+
+        moved = logs.read_text().replace("Patrick Mahomes,KC", "Patrick Mahomes,NYJ")
+        (tmp_path / "logs2.csv").write_text(moved)
+        run(["--config", str(cfg_path), "parlay", "correlations",
+             "--from", str(tmp_path / "logs2.csv")])
+
+        db = Database(tmp_path / "t.db")
+        assert load_book(db).team_for(
+            "americanfootball_nfl", "Patrick Mahomes"
+        ) == "NYJ"
+        db.close()
+
+
+class TestRosterRefreshDuringScan:
+    def test_a_scan_refreshes_a_cold_feed(self, wired, tmp_path, monkeypatch, capsys):
+        cfg_path, _client, tmp_path = wired
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["parlay"]["roster_auto_refresh"] = True
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+        csv_text = (
+            "season,team,position,depth_chart_position,status,full_name\n"
+            "2026,KC,QB,QB,ACT,Patrick Mahomes\n"
+            "2026,KC,TE,TE,ACT,Travis Kelce\n"
+            "2026,KC,WR,WR,ACT,Rashee Rice\n"
+            "2026,KC,RB,RB,ACT,Isiah Pacheco\n"
+        )
+        monkeypatch.setattr(rosters_mod, "_http_get", lambda url, timeout=30: csv_text)
+
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+        out = capsys.readouterr().out
+        assert "refreshed 4 players" in out
+        assert "ticket legs have a known club" in out
+
+    def test_a_dead_feed_does_not_stop_the_scan(self, wired, tmp_path, monkeypatch, capsys):
+        cfg_path, _client, tmp_path = wired
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["parlay"]["roster_auto_refresh"] = True
+        cfg_path.write_text(yaml.safe_dump(cfg))
+
+        def dead(url, timeout=30):
+            raise RuntimeError("no route to host")
+
+        monkeypatch.setattr(rosters_mod, "_http_get", dead)
+        assert run(["--config", str(cfg_path), "parlay", "scan", "--no-report"]) == 0
+        out = capsys.readouterr().out
+        assert "could not fetch" in out
+        assert "Ranked by expected value" in out
+
+    def test_auto_refresh_off_means_a_scan_never_reaches_out(self, wired, monkeypatch):
+        # The `no_network` fixture would already fail this, but the point is
+        # worth pinning: turning it off must actually turn it off.
+        cfg_path, _client, _tmp = wired
+
+        def boom(url, timeout=30):
+            raise AssertionError("auto-refresh was off and it fetched anyway")
+
+        monkeypatch.setattr(rosters_mod, "_http_get", boom)
+        assert run(["--config", str(cfg_path), "parlay", "scan", "--no-report"]) == 0
+
+
+class TestStructuralInferenceInAScan:
+    def test_two_quarterbacks_are_paired_without_any_roster(self, wired, tmp_path):
+        cfg_path, client, tmp_path = wired
+        client._event_odds[("americanfootball_nfl", "kc1")] = prop_event(spec=[
+            ("player_pass_yds", "Patrick Mahomes", 249.5, (1.62, 2.42)),
+            ("player_pass_yds", "Bo Nix", 219.5, (1.66, 2.33)),
+            ("player_reception_yds", "Travis Kelce", 64.5, (1.70, 2.25)),
+        ])
+        run(["--config", str(cfg_path), "parlay", "scan", "--no-report"])
+
+        db = Database(tmp_path / "t.db")
+        teams = {}
+        for ticket in db.latest_parlay_tickets(50):
+            for leg in db.parlay_legs(ticket["id"]):
+                if leg["team"]:
+                    teams[leg["selection"]] = leg["team"]
+        db.close()
+        # The two passers are placed on opposite sides of this one game,
+        # with no roster involved; the receiver stays unknown.
+        assert teams.get("Patrick Mahomes") != teams.get("Bo Nix")
+        assert teams.get("Patrick Mahomes") is not None
+        assert "Travis Kelce" not in teams

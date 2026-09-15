@@ -690,6 +690,7 @@ def cmd_parlay_scan(cfg: Config, args) -> int:
     _log_spend(db, client, "parlay scan", ",".join(result.sports)[:200])
 
     print(R.parlay_summary(result))
+    print(R.roster_note(result, cfg))
     print()
     print(R.parlay_console(
         R.sorted_by_ev(result.clean), limit=args.limit,
@@ -794,6 +795,8 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
 def cmd_parlay_correlations(cfg: Config, args) -> int:
     from . import correlation as C
 
+    from . import rosters as RO
+
     db = Database(cfg.database)
     if args.source:
         rows = C.read_game_logs(args.source)
@@ -806,6 +809,26 @@ def cmd_parlay_correlations(cfg: Config, args) -> int:
             f"Read {len(rows):,} stat lines and fitted {written} pairwise "
             f"correlation(s)."
         )
+
+        # The same logs already carry player -> team, which the fitter
+        # needs to bucket its pairs and was otherwise throwing away. Keeping
+        # it means the command you have to run anyway is the one that keeps
+        # your rosters current.
+        learned = RO.from_game_logs(rows)
+        by_sport: dict[str, list] = {}
+        for entry in learned:
+            by_sport.setdefault(entry.sport, []).append(entry)
+        for sport, entries in sorted(by_sport.items()):
+            for source in {e.source for e in entries}:
+                db.replace_rosters(
+                    sport, source, [e for e in entries if e.source == source]
+                )
+        if learned:
+            print(
+                f"Learned {len(learned):,} player/team mapping(s) from the same "
+                f"logs across {len(by_sport)} sport(s) -- no separate roster "
+                "file needed for those players."
+            )
 
     store = C.EstimateStore.from_db(db)
     if not len(store):
@@ -840,6 +863,117 @@ def cmd_parlay_correlations(cfg: Config, args) -> int:
         "min_correlation_sample). Below that the prior\nis used and the pair "
         "is reported as prior-based."
     )
+    db.close()
+    return 0
+
+
+def cmd_parlay_rosters(cfg: Config, args) -> int:
+    """
+    What is known about who plays for whom, and how stale it is.
+
+    Worth looking at before trusting a same-team correlation, because the
+    failure this reports is silent otherwise: an unknown team quietly
+    downgrades a +0.45 prior to a blended +0.25, and a stale one is worse
+    still.
+    """
+    from . import rosters as RO
+
+    db = Database(cfg.database)
+    sports = args.sports or list(cfg.sports) or list(RO.PROVIDERS)
+
+    if args.refresh or cfg.parlay.roster_auto_refresh:
+        report = RO.refresh_providers(
+            db, sports,
+            refresh_days=0 if args.refresh else cfg.parlay.roster_refresh_days,
+            force=args.refresh,
+        )
+        for sport, n in sorted(report.refreshed.items()):
+            print(f"Fetched {n:,} players for {sport} from "
+                  f"{RO.provider_name(sport)}.")
+        for sport, why in sorted(report.skipped.items()):
+            print(f"{sport}: {why}")
+        for error in report.errors:
+            print(f"Could not refresh: {error}")
+        if report.refreshed or report.errors:
+            print()
+
+    book = RO.load_book(
+        db,
+        manual_path=cfg.parlay.rosters_path,
+        max_age_days=cfg.parlay.roster_max_age_days,
+    )
+    if book.rejected_stale:
+        # Said before the "nothing known" branch below, because "you have
+        # rosters and they are all too old" is a completely different
+        # problem from "you have none", and the fix is different too.
+        print(
+            f"{book.rejected_stale:,} entr(y/ies) were dropped for being older "
+            f"than {cfg.parlay.roster_max_age_days:g} days. That is deliberate: a "
+            "stale roster is\nworse than none, because a wrong team puts a "
+            "confident sign on a pair and\nnothing downstream questions it.\n"
+        )
+
+    if not len(book):
+        print(
+            "No rosters usable, so every same-game pair falls back to the "
+            "blended priors.\n\nThree ways to fix that, cheapest first:\n"
+            "  betedge parlay correlations --from logs.csv   learns them from "
+            "the box scores\n"
+            "                                                you already fit "
+            "correlations from\n"
+            "  betedge parlay rosters --refresh              pulls a published "
+            "feed where one exists\n"
+            f"  parlay.rosters_path in {args.config if hasattr(args, 'config') else 'config.yaml'}"
+            "            your own player,team CSV, which wins over both"
+        )
+        db.close()
+        return 0
+
+    header = f"{'sport':<26} {'players':>8}  sources"
+    print(header)
+    print("-" * max(len(header), 60))
+    for sport in book.sports():
+        counts = book.source_counts(sport)
+        detail = ", ".join(
+            f"{src} ({n:,}"
+            + (f", newest {book.newest_age(sport, src):.0f}d"
+               if book.newest_age(sport, src) is not None else "")
+            + ")"
+            for src, n in sorted(counts.items())
+        )
+        print(f"{sport:<26} {sum(counts.values()):>8,}  {detail}")
+
+    if book.ambiguous:
+        print(
+            f"\n{len(book.ambiguous)} name(s) are claimed by two teams within "
+            "one source -- two different\nplayers who share a name. They are "
+            "left unresolved rather than guessed at:"
+        )
+        for sport, key in sorted(book.ambiguous)[:10]:
+            print(f"  {sport}: {key}")
+
+    conflicts = book.conflicts()
+    if conflicts:
+        print(
+            f"\n{len(conflicts)} player(s) are placed on different teams by "
+            "different sources. Your\nmanual file wins, which is usually right "
+            "-- but check it is not simply out of date:"
+        )
+        for sport, key, entries in conflicts[:10]:
+            detail = "  vs  ".join(e.describe(book.today) for e in entries)
+            print(f"  {sport}: {key}: {detail}")
+
+    if args.player:
+        print()
+        for name in args.player:
+            for sport in book.sports():
+                found = book.lookup(sport, name)
+                if found:
+                    print(f"{name}: {found.describe(book.today)}  [{sport}]")
+                    break
+            else:
+                print(f"{name}: unknown -- falls back to the blended same-game prior")
+
     db.close()
     return 0
 
@@ -1101,6 +1235,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--max-pairs", type=int, default=200_000,
                    help="cap on joint observations kept per market pair")
     s.set_defaults(func=cmd_parlay_correlations)
+
+    s = psub.add_parser(
+        "rosters",
+        help="who plays for whom, where it came from, and how stale it is",
+    )
+    s.add_argument("--refresh", action="store_true",
+                   help="fetch the roster feed now, ignoring the refresh interval")
+    s.add_argument("--sports", nargs="+")
+    s.add_argument("--player", nargs="+", metavar="NAME",
+                   help="look up specific players")
+    s.set_defaults(func=cmd_parlay_rosters)
 
     s = psub.add_parser(
         "verify-payouts",

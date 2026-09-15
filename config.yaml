@@ -284,11 +284,43 @@ parlay:
   # price both surrounding half-lines. Flagged wherever it is used.
   assumed_push_prob: 0.05
 
-  # player,team CSV or YAML. Without one, two players in the same game
-  # cannot be told apart as team mates or opponents, so the sharp priors
-  # (a QB with his own receiver, two backs splitting carries) cannot be
-  # applied and weaker blended numbers are used instead. Nothing ships,
-  # because a roster goes stale within a week.
+  # -------------------------------------------------------------------------
+  # ROSTERS: who plays for whom.
+  #
+  # The Odds API does not say. Without a team, two players in one game
+  # cannot be told apart as team mates or opponents, so the sharpest
+  # priors -- a QB with his own receiver at +0.45, two backs splitting
+  # carries at -0.30 -- cannot be applied and weaker blended numbers are
+  # used instead. See rosters.py; check what you have with
+  # `betedge parlay rosters`.
+  #
+  # Teams arrive from four places and you need do nothing for the first
+  # three:
+  #   1. the game logs you fit correlations from already carry a `team`
+  #      column, so `parlay correlations --from logs.csv` learns them;
+  #   2. a published roster feed, fetched below (NFL only for now);
+  #   3. inference from the slate itself, where a market has exactly one
+  #      player per team -- two starting quarterbacks in one game are
+  #      necessarily opponents, no data required;
+  #   4. your own file, which overrides all of them.
+  # -------------------------------------------------------------------------
+
+  # Pull the roster feed during a scan once its snapshot has gone cold.
+  # Set false to keep a scan's only network call the Odds API and refresh
+  # by hand with `betedge parlay rosters --refresh`. A failed fetch never
+  # stops a scan -- it costs the sharp priors, not the run.
+  roster_auto_refresh: true
+  roster_refresh_days: 3
+
+  # Past this, a player's team is not used AT ALL rather than used quietly.
+  # A stale roster is worse than no roster: an unknown team costs you the
+  # weak blended prior, a wrong one puts a confident +0.45 on a pair that
+  # is really -0.10 and nothing downstream will question it.
+  roster_max_age_days: 30
+
+  # Your own player,team[,sport,position,as_of] CSV, or a YAML mapping.
+  # Highest precedence of all, because on the morning of a trade you know
+  # before any feed does. Optional -- the layers above cover most of it.
   # rosters_path: data/rosters.csv
 
 database: data/betedge.db

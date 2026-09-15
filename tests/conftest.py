@@ -105,6 +105,31 @@ class FakeClient:
         return self.quota
 
 
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """
+    Enforce the suite's promise rather than assume it.
+
+    "No network, no credits" was true by construction while every caller
+    took an injected client. Roster refresh broke that: `parlay scan` can
+    now fetch a roster feed on its own, and a test that forgot to turn it
+    off quietly made a real HTTP request -- which passed, slowly, and would
+    fail on a machine with no route out. Blocking requests at the source
+    turns that from a silent dependency into an immediate, obvious failure.
+    """
+    import requests
+
+    def blocked(*args, **kwargs):
+        raise AssertionError(
+            f"a test tried to reach the network: {args[:2]}. Inject a fake "
+            "opener or client instead."
+        )
+
+    monkeypatch.setattr(requests, "get", blocked)
+    monkeypatch.setattr(requests, "post", blocked)
+    monkeypatch.setattr(requests.Session, "request", blocked)
+
+
 @pytest.fixture
 def cfg(tmp_path):
     c = Config()

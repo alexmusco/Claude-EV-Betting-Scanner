@@ -15,6 +15,7 @@ from conftest import NOW, book, event_payload, outcome
 
 from betedge.config import Config
 from betedge.parlay import Leg
+from betedge.rosters import RosterBook
 
 # A player prop: (market, player, line, (pinnacle over, pinnacle under)).
 # The pick'em book posts the same line at a nominal price -- which is what
@@ -134,9 +135,17 @@ def parlay_config(tmp_path, **overrides):
     cfg.parlay.draws = 20_000
     cfg.parlay.search_draws = 4_000
     cfg.parlay.beam_width = 8
+    # Tests never reach the network; the roster layer is exercised
+    # explicitly with a fake opener where it is the thing under test.
+    cfg.parlay.roster_auto_refresh = False
     for key, value in overrides.items():
         setattr(cfg.parlay, key, value)
     return cfg
+
+
+def roster_book(mapping=None, sport="americanfootball_nfl", **kwargs) -> RosterBook:
+    """A RosterBook over a plain {player: team} map, dated today."""
+    return RosterBook.from_mapping(mapping or KC_TEAMS, sport=sport, **kwargs)
 
 
 def make_leg(**overrides) -> Leg:

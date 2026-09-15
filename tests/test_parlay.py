@@ -26,6 +26,7 @@ from fixtures import (
     make_leg,
     parlay_config,
     prop_event,
+    roster_book,
 )
 
 from betedge import copula, correlation as C, parlay as P
@@ -367,8 +368,9 @@ class TestBuildLegs:
         assert "sharp_overround_out_of_bounds" in rejections
 
     def test_the_roster_puts_a_team_on_the_leg(self, pcfg):
-        legs = legs_from(prop_event(), pcfg, rosters=KC_TEAMS)
+        legs = legs_from(prop_event(), pcfg, rosters=roster_book())
         assert all(l.team == "Kansas City Chiefs" for l in legs)
+        assert all(l.team_source == "manual" for l in legs)
 
     def test_without_a_roster_the_team_is_left_unknown(self, pcfg):
         assert all(l.team is None for l in legs_from(prop_event(), pcfg))
@@ -807,11 +809,24 @@ class TestGuards:
         t = self.evaluate(legs, pcfg, priors, table)
         assert "leg_teams_unknown_same_game_priors_are_blends" in t.flags
 
-    def test_nothing_structural_matching_is_disclosed(self, pcfg, priors, table):
+    def test_unknown_teams_with_no_prior_point_at_the_rosters(self, pcfg, priors, table):
         legs = [make_leg(selection="A", market="player_steals", team=None),
                 make_leg(selection="B", market="player_blocks", team=None)]
         t = self.evaluate(legs, pcfg, priors, table)
         assert any("no_structural_correlation_matched" in f for f in t.flags)
+        assert any("parlay rosters" in f for f in t.flags)
+
+    def test_known_teams_with_no_prior_point_at_the_priors_file(
+        self, pcfg, priors, table
+    ):
+        # The rosters are fine here; nobody has written a prior for this
+        # pair of markets. Telling the user to fix their rosters would send
+        # them to the wrong file.
+        legs = [make_leg(selection="A", market="player_steals", team="KC"),
+                make_leg(selection="B", market="player_blocks", team="KC")]
+        t = self.evaluate(legs, pcfg, priors, table)
+        assert any("no_prior_for_these_markets" in f for f in t.flags)
+        assert not any("rosters" in f for f in t.flags)
 
     def test_leg_level_flags_reach_the_ticket(self, pcfg, priors, table):
         legs = three_legs()
