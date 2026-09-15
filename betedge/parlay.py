@@ -1958,6 +1958,8 @@ class CoverageRow:
     markets_seen: set = field(default_factory=set)
     by_book: dict = field(default_factory=dict)
     books_asked: tuple = ()
+    window_hours: float = 0.0
+    events_posted: int = 0
     credits_spent: int = 0
     error: str = ""
 
@@ -1974,14 +1976,27 @@ class CoverageRow:
     @property
     def silent_books(self) -> list[str]:
         """
-        Books that were asked for and returned nothing at all.
+        Books that were asked and returned nothing at all.
 
         Either the API does not carry them, or they are not pricing this
         sport right now. Both mean the same thing for the optimizer -- no
         legs -- and it is worth saying out loud rather than leaving as an
         absence in a table.
+
+        Empty when nothing was probed, which is the important case: with
+        no event in the window no book is ever asked, and reporting every
+        one of them as silent would read as a verdict on the feed when in
+        fact the question was never put. `probed_nothing` says that
+        instead.
         """
+        if not self.events_probed:
+            return []
         return [b for b in self.books_asked if not self.by_book.get(b)]
+
+    @property
+    def probed_nothing(self) -> bool:
+        """No event was in the window, so nothing was asked of anybody."""
+        return self.events_probed == 0
 
     @property
     def best_book(self) -> "BookCoverage | None":
@@ -2053,7 +2068,9 @@ def probe_coverage(
             rows.append(row)
             continue
 
-        events = _events_in_window(events, now, cfg, max_hours=cfg.prop_window_hours(sport))
+        row.events_posted = len(events)
+        row.window_hours = cfg.prop_window_hours(sport)
+        events = _events_in_window(events, now, cfg, max_hours=row.window_hours)
         row.events_in_window = len(events)
         for event in events[:max_events_per_sport]:
             try:

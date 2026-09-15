@@ -1485,3 +1485,85 @@ class TestSilentBooks:
             by_book[leg.book] = by_book.get(leg.book, 0) + 1
         assert by_book["underdog"] == by_book["prizepicks"] > 0
         assert len({leg.identity for leg in legs}) == len(legs)
+
+
+class TestProbedNothing:
+    """
+    A probe that asked nobody anything is not a finding about any book.
+
+    Reporting every requested book as silent in that case reads as a
+    verdict on the feed — "the API does not carry PrizePicks" — when the
+    question was never actually put.
+    """
+
+    def probe(self, pcfg, hours_out, window, **kwargs):
+        from conftest import FakeClient
+        from fixtures import two_book_event
+
+        pcfg.prop_windows["americanfootball_nfl"] = window
+        client = FakeClient(
+            events_by_sport={"americanfootball_nfl": [
+                {"id": "tnf",
+                 "commence_time": (NOW + timedelta(hours=hours_out)).isoformat()}
+            ]},
+            event_odds={("americanfootball_nfl", "tnf"): two_book_event(
+                event_id="tnf", commence_hours=hours_out,
+                books_and_shifts=(("underdog", 0.0), ("prizepicks", 0.0)),
+            )},
+        )
+        return P.probe_coverage(
+            pcfg, client, sports=["americanfootball_nfl"], now=NOW, **kwargs
+        ).rows[0]
+
+    def test_an_event_outside_the_window_is_never_probed(self, pcfg):
+        row = self.probe(pcfg, hours_out=57, window=48)
+        assert row.events_posted == 1
+        assert row.events_in_window == 0
+        assert row.probed_nothing
+
+    def test_no_book_is_called_silent_when_nothing_was_probed(self, pcfg):
+        row = self.probe(pcfg, hours_out=57, window=48)
+        assert row.books_asked
+        assert row.silent_books == []
+
+    def test_it_costs_nothing_when_there_is_nothing_to_probe(self, pcfg):
+        assert self.probe(pcfg, hours_out=57, window=48).credits_spent == 0
+
+    def test_a_wider_window_reaches_the_same_game(self, pcfg):
+        row = self.probe(pcfg, hours_out=57, window=96)
+        assert row.events_probed == 1
+        assert not row.probed_nothing
+        assert row.by_book["underdog"].matched_on_same_line > 0
+
+    def test_only_then_is_a_silent_book_a_real_finding(self, pcfg):
+        from conftest import FakeClient
+        from fixtures import two_book_event
+
+        pcfg.prop_windows["americanfootball_nfl"] = 96
+        client = FakeClient(
+            events_by_sport={"americanfootball_nfl": [
+                {"id": "tnf",
+                 "commence_time": (NOW + timedelta(hours=57)).isoformat()}
+            ]},
+            event_odds={("americanfootball_nfl", "tnf"): two_book_event(
+                event_id="tnf", commence_hours=57,
+                books_and_shifts=(("underdog", 0.0),),
+            )},
+        )
+        row = P.probe_coverage(
+            pcfg, client, sports=["americanfootball_nfl"], now=NOW
+        ).rows[0]
+        assert row.events_probed == 1
+        assert "prizepicks" in row.silent_books
+
+    def test_the_window_it_used_is_recorded(self, pcfg):
+        assert self.probe(pcfg, hours_out=57, window=48).window_hours == 48
+
+    def test_no_events_posted_at_all_is_distinguishable(self, pcfg):
+        from conftest import FakeClient
+
+        row = P.probe_coverage(
+            pcfg, FakeClient(), sports=["americanfootball_nfl"], now=NOW
+        ).rows[0]
+        assert row.events_posted == 0
+        assert row.probed_nothing

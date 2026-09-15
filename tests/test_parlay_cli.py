@@ -890,3 +890,60 @@ class TestProfileFlag:
         run(["--config", str(cfg_path), "scan", "--no-report",
              "--profile", "nfl-week"])
         assert "Profile 'nfl-week' applied:" in capsys.readouterr().out
+
+
+class TestCoverageProbedNothing:
+    def wire_far_game(self, cfg_path, client, hours=57, window=48):
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["prop_windows"] = {"americanfootball_nfl": window}
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        client._events = {"americanfootball_nfl": [
+            {"id": "tnf", "commence_time": (NOW + timedelta(hours=hours)).isoformat()}
+        ]}
+        client._event_odds = {("americanfootball_nfl", "tnf"): two_book_event(
+            event_id="tnf", commence_hours=hours,
+            books_and_shifts=(("underdog", 0.0), ("prizepicks", 0.0)),
+        )}
+
+    def test_it_says_nothing_was_probed_rather_than_blaming_the_books(
+        self, wired, capsys
+    ):
+        cfg_path, client, _tmp = wired
+        self.wire_far_game(cfg_path, client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = capsys.readouterr().out
+        assert "NOTHING was probed" in out
+        assert "none inside the 48h window" in out
+        # The line that would have been a false verdict on the feed.
+        assert "No quotes at all from" not in out
+        assert "No conclusion about any book" in out
+
+    def test_it_tells_you_how_to_reach_the_game(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_far_game(cfg_path, client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = capsys.readouterr().out
+        assert "--window 96" in out
+        assert "--profile nfl-week" in out
+
+    def test_the_window_flag_reaches_it(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_far_game(cfg_path, client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl", "--window", "96"])
+        out = capsys.readouterr().out
+        assert "NOTHING was probed" not in out
+        assert "by book:" in out
+        assert "underdog" in out and "prizepicks" in out
+
+    def test_the_profile_reaches_it_too(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_far_game(cfg_path, client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl", "--profile", "nfl-week"])
+        out = capsys.readouterr().out
+        assert "Profile 'nfl-week' applied:" in out
+        assert "NOTHING was probed" not in out
+        assert "by book:" in out

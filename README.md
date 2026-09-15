@@ -755,6 +755,14 @@ line** — the number that actually decides usability. A book can post a
 thousand props and be worth nothing here if it prices them at numbers
 Pinnacle does not touch, and only a per-book match rate shows that.
 
+A probe only reports on books it actually asked. With no event inside the
+window nothing is probed and no book is asked anything, so the run says
+that plainly instead of listing every book as silent — which would read
+as a verdict on your feed from a question that was never put. Use
+`--window HOURS` or `--profile nfl-week` to reach a game further out; a
+probe asks what *exists*, so looking further ahead than you would ever
+bet is the right move.
+
 It asks about the known pick'em sites whether or not they are configured,
 because cost is `markets × ceil(books ÷ 10)` — ten books bill as one — so
 the honest way to find out whether a book is available to you is to ask
@@ -799,7 +807,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          685 tests; no network, no credits spent
+tests/          696 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 

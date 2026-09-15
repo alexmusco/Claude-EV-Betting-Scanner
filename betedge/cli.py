@@ -811,6 +811,14 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
     """
     from . import parlay as P
 
+    _apply_profile(cfg, args.profile)
+    if args.window is not None:
+        # A probe is not a scan: it is worth looking further ahead than you
+        # would ever bet, because the question is what EXISTS, not what is
+        # priced tightly enough to act on yet.
+        for sport in (args.sports or list(P.DEFAULT_PROP_SPORTS)):
+            cfg.prop_windows[sport] = args.window
+
     client = build_client(cfg)
     db = Database(cfg.database)
     sports = args.sports or list(P.DEFAULT_PROP_SPORTS)
@@ -834,6 +842,28 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
             f"{row.sport:<26} {row.events_in_window:>7} {row.events_probed:>7} "
             f"{row.two_sided_sharp_markets:>17,} {row.credits_spent:>8,}"
         )
+
+    # Said before anything else, because a probe that asked nobody anything
+    # is not a finding about any book -- and the rest of this output would
+    # otherwise read as one.
+    blank = [r for r in report.rows if not r.error and r.probed_nothing]
+    for row in blank:
+        if row.events_posted:
+            print(
+                f"\n{row.sport}: {row.events_posted} event(s) posted, none "
+                f"inside the {row.window_hours:g}h window, so NOTHING was "
+                f"probed and no book was asked anything.\n"
+                f"  A Thursday night game is about 57 hours out on the "
+                f"Tuesday before it. To reach it:\n"
+                f"    betedge parlay coverage --window 96\n"
+                f"    betedge parlay coverage --profile nfl-week"
+            )
+        else:
+            print(
+                f"\n{row.sport}: the API has no events posted at all, so "
+                f"nothing was probed. Out of season,\n  or the slate is not "
+                f"up yet."
+            )
 
     # Per book, because "which pick'em site should I use" is a different
     # question from "does this sport work at all", and the totals above
@@ -880,7 +910,15 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
         )
 
     usable = report.recommended
-    if usable:
+    if blank and not usable:
+        # The generic "nothing is usable" line below would be misleading
+        # here: it invites the reader to conclude something about coverage
+        # from a probe that never ran.
+        print(
+            "\nNo conclusion about any book from this run -- widen the window "
+            "and probe again."
+        )
+    elif usable:
         print(f"\nUsable today: {', '.join(usable)}")
         print("Put these in `sports:` in config.yaml for the prop pass.")
         best = {
@@ -1420,6 +1458,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="books to ask about. Defaults to your configured "
                         "books plus the known pick'em sites. Asking for more "
                         "costs nothing -- ten books bill as one region.")
+    s.add_argument("--window", type=float, metavar="HOURS",
+                   help="look this far ahead instead of the configured prop "
+                        "window. A probe asks what EXISTS, so it is worth "
+                        "looking further out than you would bet.")
+    s.add_argument("--profile", metavar="NAME",
+                   help="apply a named bundle of overrides first, e.g. "
+                        "nfl-week. See `betedge profiles`.")
     s.set_defaults(func=cmd_parlay_coverage)
 
     s = psub.add_parser(
