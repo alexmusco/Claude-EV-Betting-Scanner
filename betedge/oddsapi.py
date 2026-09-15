@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -291,9 +292,17 @@ class OddsApiClient:
 
     @staticmethod
     def _markets_named_in(message: str, markets: Sequence[str]) -> set[str]:
-        """Which of the requested market keys the error message mentions."""
-        lowered = message.lower()
-        return {m for m in markets if m.lower() in lowered}
+        """
+        Which of the requested market keys the error message actually names.
+
+        Matched as whole tokens, not substrings. Market keys nest --
+        `player_points` is a prefix of `player_points_rebounds`, and
+        `totals` of `totals_h1` -- so a substring test on an error naming
+        the longer key would also condemn the shorter one and blacklist a
+        perfectly good market for the rest of the session.
+        """
+        tokens = set(re.findall(r"[a-z0-9_]+", message.lower()))
+        return {m for m in markets if m.lower() in tokens}
 
     # ------------------------------------------------------------- helpers
 

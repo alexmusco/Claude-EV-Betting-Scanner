@@ -114,3 +114,36 @@ class TestMarketRejection:
         c._bad_markets.add("bad_market")
         monkeypatch.setattr(c, "_get", lambda *a, **k: pytest.fail("should not call"))
         assert c.event_odds("nfl", "e1", ["bad_market"], ["pinnacle"]) is None
+
+
+class TestMarketKeyNesting:
+    """Market keys nest, and a substring match on one condemns the other."""
+
+    @pytest.mark.parametrize("bad,requested,expected", [
+        ("player_points_rebounds",
+         ["player_points", "player_points_rebounds", "player_rebounds"],
+         {"player_points_rebounds"}),
+        ("totals_h1", ["totals", "totals_h1"], {"totals_h1"}),
+        ("player_pass_yds_alternate",
+         ["player_pass_yds", "player_pass_yds_alternate"],
+         {"player_pass_yds_alternate"}),
+        ("h2h_3_way", ["h2h", "h2h_3_way"], {"h2h_3_way"}),
+    ])
+    def test_only_the_named_key_is_condemned(self, bad, requested, expected):
+        msg = f"422: {{'message': \"Unknown market. The market key '{bad}' is not valid\"}}"
+        assert OddsApiClient._markets_named_in(msg, requested) == expected
+
+    def test_several_bad_keys_in_one_message(self):
+        msg = "422: markets 'alpha_one' and 'beta_two' are not valid"
+        found = OddsApiClient._markets_named_in(
+            msg, ["alpha_one", "beta_two", "gamma_three"]
+        )
+        assert found == {"alpha_one", "beta_two"}
+
+    def test_a_good_market_is_never_condemned_by_a_neighbour(self):
+        """The failure this guards: player_points is among the most valuable
+        NBA markets, and losing it for a session is not a small cost."""
+        msg = "The market key 'player_points_rebounds_assists' is not valid"
+        assert "player_points" not in OddsApiClient._markets_named_in(
+            msg, ["player_points", "player_points_rebounds_assists"]
+        )
