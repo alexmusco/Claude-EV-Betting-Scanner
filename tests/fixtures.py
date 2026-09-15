@@ -91,6 +91,43 @@ def prop_event(
     )
 
 
+def two_book_event(
+    spec=None,
+    event_id="kc1",
+    books_and_shifts=(("underdog", 0.0), ("prizepicks", 1.0)),
+    commence_hours=8,
+):
+    """
+    One event where several pick'em books quote the same players, but not
+    all of them on Pinnacle's line.
+
+    This is the shape the coverage probe has to tell apart: a book posting
+    plenty of props at numbers Pinnacle does not price is worth nothing
+    here, and looks identical to a good one until you count matches.
+    """
+    spec = KC_STACK if spec is None else spec
+    pinnacle: dict[str, list] = {}
+    for market, player, line, (over, under) in spec:
+        pinnacle.setdefault(market, []).extend([
+            outcome("Over", over, point=line, description=player),
+            outcome("Under", under, point=line, description=player),
+        ])
+    books = [book("pinnacle", pinnacle)]
+    for name, shift in books_and_shifts:
+        quotes: dict[str, list] = {}
+        for market, player, line, _prices in spec:
+            quotes.setdefault(market, []).extend([
+                outcome("Over", 1.91, point=line + shift, description=player),
+                outcome("Under", 1.91, point=line + shift, description=player),
+            ])
+        books.append(book(name, quotes))
+    return event_payload(
+        event_id=event_id,
+        commence=NOW + timedelta(hours=commence_hours),
+        bookmakers=books,
+    )
+
+
 def ladder_event(
     market="player_receptions",
     player="Travis Kelce",

@@ -1881,6 +1881,48 @@ def _leg_serves(leg: Leg, product: Product, cfg: Config) -> bool:
 # --------------------------------------------------------------------------
 
 
+#: Pick'em books worth ASKING about in a coverage probe, whether or not
+#: they are configured. Cost is markets x ceil(books / 10), so naming ten
+#: books costs exactly what naming one does -- which means the honest way
+#: to find out whether a book is available is to ask for it and report
+#: what came back, rather than to assert it from memory.
+PICKEM_BOOK_CANDIDATES = ("underdog", "prizepicks")
+
+#: Minimum matched legs before a pool is worth searching. Two legs is a
+#: ticket, but a pool that small produces nothing worth having.
+USABLE_MATCHED_LEGS = 8
+
+
+@dataclass
+class BookCoverage:
+    """What one book actually offers against Pinnacle, on one sport."""
+
+    book: str
+    quotes: int = 0                 #: two-sided over/under selections seen
+    on_a_pinnacle_market: int = 0   #: same player and stat as a Pinnacle market
+    matched_on_same_line: int = 0   #: ...and on the same line, so usable
+    players: set = field(default_factory=set)
+    markets: set = field(default_factory=set)
+
+    @property
+    def match_rate(self) -> float:
+        """
+        Share of this book's quotes that are usable as legs.
+
+        The number that decides whether a book is worth anything here. A
+        book can post a thousand props and still be useless if it prices
+        them at numbers Pinnacle does not touch, because a leg compared
+        against a different line is not a measurement of anything.
+        """
+        if not self.quotes:
+            return 0.0
+        return self.matched_on_same_line / self.quotes
+
+    @property
+    def usable(self) -> bool:
+        return self.matched_on_same_line >= USABLE_MATCHED_LEGS
+
+
 @dataclass
 class CoverageRow:
     sport: str
@@ -1891,6 +1933,8 @@ class CoverageRow:
     matched_on_same_line: int = 0
     players_seen: set = field(default_factory=set)
     markets_seen: set = field(default_factory=set)
+    by_book: dict = field(default_factory=dict)
+    books_asked: tuple = ()
     credits_spent: int = 0
     error: str = ""
 
@@ -1905,13 +1949,29 @@ class CoverageRow:
         return self.matched_on_same_line / self.two_sided_sharp_markets
 
     @property
+    def silent_books(self) -> list[str]:
+        """
+        Books that were asked for and returned nothing at all.
+
+        Either the API does not carry them, or they are not pricing this
+        sport right now. Both mean the same thing for the optimizer -- no
+        legs -- and it is worth saying out loud rather than leaving as an
+        absence in a table.
+        """
+        return [b for b in self.books_asked if not self.by_book.get(b)]
+
+    @property
+    def best_book(self) -> "BookCoverage | None":
+        return max(
+            self.by_book.values(),
+            key=lambda b: b.matched_on_same_line,
+            default=None,
+        )
+
+    @property
     def usable(self) -> bool:
-        """
-        Enough two-sided Pinnacle markets with a matching quote on the same
-        line to produce candidates. Two legs is a ticket, but a pool that
-        small produces nothing worth having.
-        """
-        return self.matched_on_same_line >= 8
+        """Whether any single book offers enough matched legs to search."""
+        return any(b.usable for b in self.by_book.values())
 
 
 @dataclass
@@ -1932,6 +1992,7 @@ def probe_coverage(
     sports: Sequence[str] | None = None,
     max_events_per_sport: int = 2,
     now: datetime | None = None,
+    books_to_probe: Sequence[str] | None = None,
 ) -> CoverageReport:
     """
     Ask the API, per sport, how many two-sided Pinnacle prop markets exist
@@ -1948,7 +2009,13 @@ def probe_coverage(
     now = now or datetime.now(timezone.utc)
     sports = list(sports if sports is not None else DEFAULT_PROP_SPORTS)
     sports, _blocked = cfg.allowed(sports)
-    target_books = sorted(set(cfg.parlay.pickem_books) | set(cfg.books.soft))
+    target_books = sorted(
+        set(books_to_probe)
+        if books_to_probe
+        else set(cfg.parlay.pickem_books)
+        | set(cfg.books.soft)
+        | set(PICKEM_BOOK_CANDIDATES)
+    )
     books = [cfg.books.sharp] + [b for b in target_books if b != cfg.books.sharp]
 
     rows: list[CoverageRow] = []
@@ -1988,12 +2055,19 @@ def probe_coverage(
                 if q.book in target_books and _is_two_sided(q.side) and q.line is not None
             ]
             for q in book_quotes:
+                seen = row.by_book.setdefault(q.book, BookCoverage(book=q.book))
+                seen.quotes += 1
+                seen.players.add(q.selection)
+                seen.markets.add(q.market)
                 rungs = ladder.get((q.market, q.selection))
                 if not rungs:
                     continue
+                seen.on_a_pinnacle_market += 1
                 row.with_book_quote += 1
                 if float(q.line) in rungs:
+                    seen.matched_on_same_line += 1
                     row.matched_on_same_line += 1
+        row.books_asked = tuple(target_books)
         row.credits_spent = client.quota.spent_this_session - before
         rows.append(row)
 

@@ -16,7 +16,13 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 
 from conftest import NOW, FakeClient
-from fixtures import KC_STACK, make_leg, parlay_config, prop_event
+from fixtures import (
+    KC_STACK,
+    make_leg,
+    parlay_config,
+    prop_event,
+    two_book_event,
+)
 
 from betedge import cli, correlation as C, parlay as P, rosters as rosters_mod
 from betedge.closing import capture_parlay_closing_lines
@@ -762,3 +768,56 @@ class TestStructuralInferenceInAScan:
         assert teams.get("Patrick Mahomes") != teams.get("Bo Nix")
         assert teams.get("Patrick Mahomes") is not None
         assert "Travis Kelce" not in teams
+
+
+class TestCoverageByBookCommand:
+    def wire_two_books(self, client):
+        from fixtures import two_book_event
+
+        client._event_odds[("americanfootball_nfl", "kc1")] = two_book_event()
+
+    def test_it_prints_a_per_book_table(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_two_books(client)
+        assert run(["--config", str(cfg_path), "parlay", "coverage",
+                    "--sports", "americanfootball_nfl"]) == 0
+        out = capsys.readouterr().out
+        assert "by book:" in out
+        assert "underdog" in out and "prizepicks" in out
+
+    def test_it_names_the_book_worth_using(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_two_books(client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = capsys.readouterr().out
+        assert "most usable legs from underdog" in out
+        assert "parlay.pickem_books" in out
+
+    def test_a_book_that_never_answers_is_called_out(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        # Only underdog quotes; prizepicks is asked for and silent.
+        client._event_odds[("americanfootball_nfl", "kc1")] = prop_event()
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = capsys.readouterr().out
+        assert "No quotes at all from" in out
+        assert "prizepicks" in out
+        assert "ten books bill as one" in out
+
+    def test_the_books_probed_can_be_chosen(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_two_books(client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl", "--books", "prizepicks"])
+        out = capsys.readouterr().out
+        assert "prizepicks" in out
+        assert "most usable legs from" not in out
+
+    def test_probing_extra_books_costs_the_same(self, wired):
+        cfg_path, client, _tmp = wired
+        self.wire_two_books(client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl", "--max-events", "1"])
+        # One per-event call, billed by markets returned, not by book count.
+        assert client.calls["event_odds"] == 1

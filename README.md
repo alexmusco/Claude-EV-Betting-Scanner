@@ -702,9 +702,17 @@ carry deep player props. That is a starting point, not a conclusion:
 betedge parlay coverage
 ```
 
-probes the API and reports, per sport, how many two-sided Pinnacle prop
-markets exist and how many a target book quotes **on the same line** — the
-number that actually decides usability. Tennis, MMA and soccer are
+probes the API and reports, per sport **and per book**, how many two-sided
+Pinnacle prop markets exist and how many that book quotes **on the same
+line** — the number that actually decides usability. A book can post a
+thousand props and be worth nothing here if it prices them at numbers
+Pinnacle does not touch, and only a per-book match rate shows that.
+
+It asks about the known pick'em sites whether or not they are configured,
+because cost is `markets × ceil(books ÷ 10)` — ten books bill as one — so
+the honest way to find out whether a book is available to you is to ask
+for it and report what came back. Books that are asked for and never
+answer are named, rather than left as an absence in a table. Tennis, MMA and soccer are
 excluded from the prop-based optimizer with the reason stated in
 `parlay.PROP_OPTIMIZER_EXCLUDED`: Pinnacle prices almost no player props
 in them, so there is nothing to build a marginal from. Their edge is in
@@ -744,7 +752,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          612 tests; no network, no credits spent
+tests/          626 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 

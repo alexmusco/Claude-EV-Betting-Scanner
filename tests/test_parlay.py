@@ -1236,3 +1236,97 @@ class TestParlayProducts:
             legs, P.resolve_product(table.get("draftkings_parlay"), legs)
         )
         assert ok
+
+
+class TestCoverageByBook:
+    """
+    "Which pick'em site should I use" is a different question from "does
+    this sport work", and only a per-book count can answer it. A book with
+    a thousand quotes and no line agreement is worth nothing here.
+    """
+
+    def probe(self, pcfg, payload, **kwargs):
+        from conftest import FakeClient
+
+        client = FakeClient(
+            events_by_sport={"americanfootball_nfl": [
+                {"id": "kc1", "commence_time": (NOW + timedelta(hours=8)).isoformat()}
+            ]},
+            event_odds={("americanfootball_nfl", "kc1"): payload},
+        )
+        report = P.probe_coverage(
+            pcfg, client, sports=["americanfootball_nfl"], now=NOW, **kwargs
+        )
+        return report.rows[0]
+
+    def test_each_book_is_counted_separately(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event())
+        assert set(row.by_book) == {"underdog", "prizepicks"}
+
+    def test_a_book_on_pinnacles_line_matches_and_one_off_it_does_not(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event())
+        assert row.by_book["underdog"].matched_on_same_line == 2 * len(KC_STACK)
+        assert row.by_book["prizepicks"].matched_on_same_line == 0
+        # Both posted the same number of props; only one is usable.
+        assert row.by_book["prizepicks"].quotes == row.by_book["underdog"].quotes
+
+    def test_the_match_rate_separates_them(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event())
+        assert row.by_book["underdog"].match_rate == 1.0
+        assert row.by_book["prizepicks"].match_rate == 0.0
+
+    def test_the_best_book_is_the_one_with_the_most_usable_legs(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event())
+        assert row.best_book.book == "underdog"
+
+    def test_a_book_that_returns_nothing_is_named(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(
+            pcfg,
+            two_book_event(books_and_shifts=(("underdog", 0.0),)),
+            books_to_probe=["underdog", "prizepicks"],
+        )
+        # Asked for, never quoted: either the API does not carry it or it
+        # is not pricing this sport. Said out loud rather than left as a
+        # blank row.
+        assert row.silent_books == ["prizepicks"]
+
+    def test_the_candidates_are_probed_even_when_not_configured(self, pcfg):
+        from fixtures import two_book_event
+
+        assert "prizepicks" not in pcfg.parlay.pickem_books
+        row = self.probe(pcfg, two_book_event())
+        assert "prizepicks" in row.books_asked
+        assert "prizepicks" in row.by_book
+
+    def test_asking_about_more_books_costs_nothing_extra(self, pcfg):
+        from betedge.markets import estimate_credits
+
+        # Ten books bill as one region equivalent, which is why the probe
+        # asks about books the user has not configured.
+        assert estimate_credits(1, 5, n_books=2) == estimate_credits(1, 5, n_books=10)
+
+    def test_a_sport_is_usable_when_any_single_book_is(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event())
+        assert row.usable
+        assert not row.by_book["prizepicks"].usable
+
+    def test_a_sport_is_not_usable_when_no_book_matches_lines(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event(
+            books_and_shifts=(("underdog", 1.0), ("prizepicks", 1.0))
+        ))
+        assert row.two_sided_sharp_markets > 0
+        assert not row.usable

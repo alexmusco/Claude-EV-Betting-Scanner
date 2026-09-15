@@ -748,13 +748,14 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
     db = Database(cfg.database)
     sports = args.sports or list(P.DEFAULT_PROP_SPORTS)
     report = P.probe_coverage(
-        cfg, client, sports=sports, max_events_per_sport=args.max_events
+        cfg, client, sports=sports, max_events_per_sport=args.max_events,
+        books_to_probe=args.books,
     )
     _log_spend(db, client, "parlay coverage", ",".join(sports)[:200])
 
     header = (
         f"{'sport':<26} {'events':>7} {'probed':>7} {'pinnacle 2-sided':>17} "
-        f"{'book quotes':>12} {'same line':>10} {'match':>7} {'credits':>8}"
+        f"{'credits':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -764,24 +765,72 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
             continue
         print(
             f"{row.sport:<26} {row.events_in_window:>7} {row.events_probed:>7} "
-            f"{row.two_sided_sharp_markets:>17,} {row.with_book_quote:>12,} "
-            f"{row.matched_on_same_line:>10,} {row.match_rate:>6.0%} "
-            f"{row.credits_spent:>8,}"
+            f"{row.two_sided_sharp_markets:>17,} {row.credits_spent:>8,}"
         )
+
+    # Per book, because "which pick'em site should I use" is a different
+    # question from "does this sport work at all", and the totals above
+    # cannot answer it.
+    for row in report.rows:
+        if row.error or not row.by_book:
+            continue
+        print(f"\n{row.sport} by book:")
+        sub = (
+            f"  {'book':<16} {'quotes':>8} {'on a pinnacle market':>21} "
+            f"{'same line':>10} {'usable':>7} {'players':>8}"
+        )
+        print(sub)
+        print("  " + "-" * (len(sub) - 2))
+        for book in sorted(
+            row.by_book.values(), key=lambda b: -b.matched_on_same_line
+        ):
+            print(
+                f"  {book.book:<16} {book.quotes:>8,} "
+                f"{book.on_a_pinnacle_market:>21,} "
+                f"{book.matched_on_same_line:>10,} {book.match_rate:>6.0%} "
+                f"{len(book.players):>8,}"
+            )
+        if row.silent_books:
+            print(
+                f"  asked for and got nothing back: {', '.join(row.silent_books)}"
+            )
 
     print(
         "\n'same line' is the number that matters: a pick'em line compared "
         "against\nPinnacle at a different number is not a measurement, so those "
-        "legs are\ndropped rather than approximated."
+        "legs are\ndropped rather than approximated. A book with plenty of "
+        "quotes and a low\nmatch rate is posting numbers Pinnacle does not "
+        "price, and is worth little here."
     )
+
+    silent = sorted({b for row in report.rows for b in row.silent_books})
+    if silent:
+        print(
+            f"\nNo quotes at all from: {', '.join(silent)}. Either the API "
+            "does not carry\nthem or they are not pricing these sports right "
+            "now -- both mean no legs.\nAsking for them cost nothing extra "
+            "(ten books bill as one)."
+        )
+
     usable = report.recommended
     if usable:
         print(f"\nUsable today: {', '.join(usable)}")
         print("Put these in `sports:` in config.yaml for the prop pass.")
+        best = {
+            row.sport: row.best_book for row in report.rows if row.best_book
+        }
+        for sport, book in sorted(best.items()):
+            if book.usable:
+                print(
+                    f"  {sport}: most usable legs from {book.book} "
+                    f"({book.matched_on_same_line:,} matched). Put it in "
+                    "`parlay.pickem_books`."
+                )
     else:
         print(
-            "\nNothing has usable coverage right now. Out of season, or the "
-            "slate has not been posted yet -- try again closer to game day."
+            "\nNothing has usable coverage right now. Out of season, the "
+            "slate has not been\nposted yet, or no probed book prices these "
+            "markets -- try again closer to game day."
         )
 
     print("\nDeliberately excluded from the prop-based optimizer:")
@@ -1222,6 +1271,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--sports", nargs="+")
     s.add_argument("--max-events", type=int, default=2,
                    help="events to probe per sport. This bills like a scan.")
+    s.add_argument("--books", nargs="+", metavar="KEY",
+                   help="books to ask about. Defaults to your configured "
+                        "books plus the known pick'em sites. Asking for more "
+                        "costs nothing -- ten books bill as one region.")
     s.set_defaults(func=cmd_parlay_coverage)
 
     s = psub.add_parser(
