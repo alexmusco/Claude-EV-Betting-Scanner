@@ -36,9 +36,13 @@ api:
 budget:
   enabled: true
   monthly_credits: 20000
-  # The day of the month your plan renews. Set this to your real billing
-  # day; the pacing works either way but resets cleanly if it matches.
-  cycle_day: 1
+  # The day of the month the plan renews. This has to match the real
+  # billing day or the pacing is wrong twice over: it spreads the quota
+  # across the wrong number of days, and it resets the local tally on a day
+  # the provider does not refill.
+  #
+  # Subscription started 13 Sep, so the cycle is the 13th to the 13th.
+  cycle_day: 13
   # Held back for closing-line capture, which is the only fast evidence
   # that the model works at all. Scanning never eats into it.
   reserve: 800
