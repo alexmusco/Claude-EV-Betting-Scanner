@@ -625,7 +625,7 @@ def _scan_core_markets(
 
     swept: list[str] = []
     for sport in core_sports:
-        markets = core_markets_for(sport)
+        markets = cfg.core_markets_for_sport(sport)
         try:
             payloads = client.odds(sport, markets=markets, bookmakers=books)
         except CreditBudgetExceeded as exc:
@@ -682,7 +682,9 @@ def _scan_props(
             state.errors.append(f"{sport}: could not list events: {exc}")
             continue
 
-        events = _events_in_window(events, now, cfg)
+        events = _events_in_window(
+            events, now, cfg, max_hours=cfg.prop_window_hours(sport)
+        )
         if max_events_per_sport:
             events = events[:max_events_per_sport]
 
@@ -715,8 +717,20 @@ def _scan_props(
             )
 
 
-def _events_in_window(events: list[dict], now: datetime, cfg: Config) -> list[dict]:
-    """Drop events outside the configured time window before spending credits."""
+def _events_in_window(
+    events: list[dict],
+    now: datetime,
+    cfg: Config,
+    max_hours: float | None = None,
+) -> list[dict]:
+    """
+    Drop events outside the time window before spending credits on them.
+
+    `max_hours` narrows the look-ahead for one sport. This filter runs on
+    the free event list, so every event it removes is a per-event odds call
+    never made -- which is the whole saving.
+    """
+    horizon = (max_hours if max_hours is not None else cfg.model.max_hours_to_start) * 60
     keep = []
     for e in events:
         ts = _parse_ts(e.get("commence_time"))
@@ -725,7 +739,7 @@ def _events_in_window(events: list[dict], now: datetime, cfg: Config) -> list[di
         minutes = (ts - now).total_seconds() / 60.0
         if minutes < cfg.model.min_minutes_to_start:
             continue
-        if minutes > cfg.model.max_hours_to_start * 60:
+        if minutes > horizon:
             continue
         keep.append(e)
     return keep

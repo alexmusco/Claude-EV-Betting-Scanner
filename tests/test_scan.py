@@ -337,3 +337,51 @@ class TestPostProcessing:
         opps = [self._opp(0.05, 1.0, stake=20.0)]
         S.cap_exposure(opps, cfg)
         assert opps[0].recommended_stake == 20.0
+
+
+class TestCreditSaving:
+    def test_a_narrow_prop_window_skips_distant_events(self, cfg, now):
+        """
+        MLB props before lineups post are placeholders -- batter props void
+        if the player does not start. Paying for them is the most expensive
+        way to scan nothing.
+        """
+        events = [
+            {"id": "tonight", "commence_time": (NOW + timedelta(hours=4)).isoformat()},
+            {"id": "tomorrow", "commence_time": (NOW + timedelta(hours=30)).isoformat()},
+        ]
+        client = FakeClient(events_by_sport={"baseball_mlb": events})
+        cfg.sports = ["baseball_mlb"]
+        cfg.prop_windows = {"baseball_mlb": 8}
+        scan(cfg, client, now=now)
+        assert client.calls["event_odds"] == 1, "only tonight's game is priced"
+
+    def test_without_a_window_the_global_horizon_applies(self, cfg, now):
+        events = [
+            {"id": "tonight", "commence_time": (NOW + timedelta(hours=4)).isoformat()},
+            {"id": "tomorrow", "commence_time": (NOW + timedelta(hours=30)).isoformat()},
+        ]
+        client = FakeClient(events_by_sport={"baseball_mlb": events})
+        cfg.sports = ["baseball_mlb"]
+        scan(cfg, client, now=now)
+        assert client.calls["event_odds"] == 2
+
+    def test_core_markets_can_be_narrowed_per_sport(self, cfg, now):
+        """The bulk endpoint bills for markets requested, not returned."""
+        client = FakeClient(bulk_odds={"mma_mixed_martial_arts": []})
+        cfg.core_sports = ["mma_mixed_martial_arts"]
+        cfg.core_markets = {"mma_mixed_martial_arts": ["h2h"]}
+        scan(cfg, client, now=now)
+        assert client.quota.spent_this_session == 1
+
+    def test_mma_defaults_to_moneyline_only(self, cfg, now):
+        client = FakeClient(bulk_odds={"mma_mixed_martial_arts": []})
+        cfg.core_sports = ["mma_mixed_martial_arts"]
+        scan(cfg, client, now=now)
+        assert client.quota.spent_this_session == 1
+
+    def test_a_normal_core_sweep_still_costs_three(self, cfg, now):
+        client = FakeClient(bulk_odds={"baseball_mlb": []})
+        cfg.core_sports = ["baseball_mlb"]
+        scan(cfg, client, now=now)
+        assert client.quota.spent_this_session == 3

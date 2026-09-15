@@ -211,8 +211,12 @@ SPORTS: dict[str, Sport] = {
             key="mma_mixed_martial_arts",
             title="MMA",
             props=(),
+            # The bulk endpoint bills for markets REQUESTED, not returned, so
+            # asking for spreads and totals that no book prices on a fight
+            # card costs two credits a sweep and returns nothing.
+            core=("h2h",),
             notes="Pinnacle sharp, soft books slow to move on fight-week news. "
-            "Moneyline only in practice.",
+            "Moneyline only in practice -- hence the single core market.",
         ),
     ]
 }

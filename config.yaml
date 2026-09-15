@@ -1,5 +1,10 @@
 # betedge configuration
+#
+# Tuned for: DraftKings only (Oregon), 20,000 credits a month.
 # Everything here can be overridden per-run with CLI flags.
+#
+# If you change one thing, change `bankroll.amount`. Everything else has a
+# defensible default; that one is personal.
 
 api:
   base_url: https://api.the-odds-api.com/v4
@@ -7,10 +12,9 @@ api:
   timeout_seconds: 20
   max_retries: 3
 
-  # Stop a scan rather than drop below this many credits, so a runaway
-  # loop cannot burn a month's quota in one night.
+  # Backstops. The real pacing is the `budget:` section below -- these two
+  # only catch a single runaway call.
   min_credits_remaining: 100
-  # Hard ceiling on what a single scan may spend.
   max_credits_per_scan: 600
 
   # Seconds to reuse a cached API response. Keep at 0 for live scanning.
@@ -18,11 +22,36 @@ api:
   cache_seconds: 0
   cache_dir: data/cache
 
+# ---------------------------------------------------------------------------
+# CREDIT BUDGET
+#
+# The per-scan ceiling above stops one bad call. This stops the slower
+# failure: spending three weeks of quota in four days and going dark.
+#
+# Spend is paced as (credits left) / (days left in cycle), times the burst
+# factor. Unspent credits roll forward on their own -- a quiet day leaves
+# more remaining, so the next day's pace is higher. Check it any time with
+# `betedge budget`.
+# ---------------------------------------------------------------------------
+budget:
+  enabled: true
+  monthly_credits: 20000
+  # The day of the month your plan renews. Set this to your real billing
+  # day; the pacing works either way but resets cleanly if it matches.
+  cycle_day: 1
+  # Held back for closing-line capture, which is the only fast evidence
+  # that the model works at all. Scanning never eats into it.
+  reserve: 800
+  # A day may spend twice the even pace, so an NFL Sunday can borrow from a
+  # quiet Tuesday. Raising this above about 4 defeats the point.
+  daily_burst: 2.0
+
 books:
   sharp: pinnacle
+  # DraftKings only -- Oregon permits no other book, and every extra book
+  # in this list is another that has to be parsed for no reachable bet.
   soft:
     - draftkings
-    - underdog
 
 model:
   # How to strip Pinnacle's margin out of its prices.
@@ -32,15 +61,25 @@ model:
   #   power          - solves sum(q^k)=1; least generous to longshots
   #   worst_case     - the lowest fair probability any method gives
   #
-  # worst_case is the default on purpose. On near-even props the methods agree
-  # to within half a point, but on lopsided ones they disagree enormously --
-  # a 1.05/9.50 market puts the longshot at 9.9% (multiplicative) or 5.9%
-  # (power). Taking the lowest means a bet only clears the bar if it clears it
-  # on every method.
+  # worst_case is the default on purpose. On near-even markets the methods
+  # agree to within half a point; on lopsided ones they disagree enormously.
+  # Taking the lowest means a bet only clears the bar if it clears it on
+  # every method.
   devig_method: worst_case
 
-  min_ev: 0.02                 # flag at +2% expected value or better
+  min_ev: 0.02                 # the base bar, for deep markets
   max_plausible_ev: 0.15       # above this, mark suspect instead of recommending
+
+  # How much MORE edge a thin market has to show. The bar becomes
+  #     min_ev * (1 + penalty * (1 - liquidity))
+  # so at 1.5: game lines flag at +2%, primary props at about +3%, and
+  # alternate lines at about +4.5%. The reason is not caution for its own
+  # sake -- in a thin market the error on the fair probability is about the
+  # size of the edge being claimed. Set to 0 for one flat bar everywhere.
+  liquidity_ev_penalty: 1.5
+  # Refuse anything below this liquidity score outright, whatever its EV.
+  # 0.30 drops alternate lines and the exotic props; 0 disables the floor.
+  min_liquidity: 0.0
 
   min_overround: 0.005         # sanity bounds on Pinnacle's own margin
   max_overround: 0.15
@@ -53,7 +92,8 @@ model:
   max_hours_to_start: 72
 
   # Alternate lines carry the biggest apparent edges and the most stale
-  # prices. Turn on once you trust the main markets.
+  # prices. The liquidity bar already makes them clear about +4.5% before
+  # they surface, but they still cost credits to fetch. Leave off.
   include_alternate_lines: false
 
 bankroll:
@@ -64,33 +104,56 @@ bankroll:
   round_to: 5
   max_total_exposure_fraction: 0.15   # cap on everything live at once
 
-# PLAYER PROPS. Expensive: one call per event per market.
-# An NFL Sunday across 13 markets is ~180 credits; MLB across 10 is ~150/day.
-sports:
-  - americanfootball_nfl
-  # - basketball_nba        # season starts late October
-  # - icehockey_nhl         # season starts October
-  - baseball_mlb            # narrowed below to two markets
-  # - soccer_epl            # thin Pinnacle prop coverage; see markets.py notes
-
+# ---------------------------------------------------------------------------
 # GAME-LEVEL MARKETS: moneyline, spreads, totals.
-# Cheap. Cost is markets x 1 for the ENTIRE sport, not per event, so one
-# sweep of every match on the board is 3 credits. Roughly fifty times
-# cheaper per opportunity than props -- at the price of thinner edges,
-# since mainlines are where the sharp money concentrates.
+#
+# Cost is markets x 1 for the ENTIRE sport, not per event, so one sweep of
+# every match on the board is 3 credits. Roughly fifty times cheaper per
+# opportunity than props -- and these are the deep, sharply priced markets
+# the liquidity scoring favours, so they clear the bar at +2% rather than
+# +3% or more.
+#
+# A full sweep of this list is about 28 credits. At 20,000 a month you can
+# afford to run it roughly hourly, which matters more than it sounds:
+# a soft-book edge often lives for minutes, not hours.
 #
 # A trailing '*' matches by prefix. Tennis publishes one sport key per
 # tournament and they rotate weekly, so 'tennis_*' is the only maintainable
 # way to say "all tennis".
+# ---------------------------------------------------------------------------
 core_sports:
-  - "tennis_*"
-  - baseball_mlb            # moneyline, run line and totals for every game: 3 credits
-  # - mma_mixed_martial_arts
-  # - soccer_epl            # three-way market; the draw is handled
+  - "tennis_*"              # Pinnacle is THE reference book here; US books lag
+  - baseball_mlb            # moneyline, run line and totals: 3 credits
+  - americanfootball_nfl
+  - americanfootball_ncaaf  # the edge is in games nobody watches
+  - mma_mixed_martial_arts  # moneyline only, so 1 credit
+  # - basketball_nba        # uncomment late October
+  # - icehockey_nhl         # uncomment October
+  # - basketball_ncaab      # uncomment November
 
-# Narrow the prop markets for a sport. Cost is markets x events, so cutting
-# MLB from ten markets to two takes a full-slate scan from ~150 credits to
-# ~30. Sports not listed here use the full set from markets.py.
+# Narrow the game-level market list for one sport. The bulk endpoint bills
+# for markets REQUESTED, not returned, so asking for markets a sport does
+# not price is pure waste.
+core_markets:
+  mma_mixed_martial_arts:
+    - h2h
+
+# ---------------------------------------------------------------------------
+# PLAYER PROPS. Expensive: cost is markets x events.
+#
+# Kept deliberately short. Props are where the big apparent edges are, and
+# also where most of them are not real -- the liquidity bar now makes them
+# show about +3% before surfacing. Two MLB markets across a full slate is
+# ~30 credits; all ten would be ~150.
+# ---------------------------------------------------------------------------
+sports:
+  - baseball_mlb
+  - americanfootball_nfl
+  # - basketball_nba        # season starts late October
+  # - icehockey_nhl         # season starts October
+
+# Which prop markets to ask for, per sport. Sports left out use the full
+# registry list from markets.py, which is usually more than you want.
 #
 # Pitcher strikeouts and batter total bases are the usual hunting ground:
 # heavily bet, so Pinnacle prices them carefully, but slow to move at the
@@ -99,8 +162,25 @@ prop_markets:
   baseball_mlb:
     - pitcher_strikeouts
     - batter_total_bases
-    # - batter_hits
-    # - batter_rbis
+  americanfootball_nfl:
+    - player_pass_yds
+    - player_rush_yds
+    - player_reception_yds
+    - player_receptions
+    - player_anytime_td
+
+# How far ahead the PROP pass looks, per sport, in hours. This filter runs
+# on the free event list, so every event it drops is a per-event call never
+# billed.
+#
+# MLB is the important one. Batter props void if the player does not start
+# and pitcher props void on a scratched starter, so until lineups post --
+# two to four hours before first pitch -- the numbers are placeholders and
+# Pinnacle's limits are low. Scanning an evening slate in the morning
+# spends credits to price lines that do not exist yet.
+prop_windows:
+  baseball_mlb: 8
+  americanfootball_nfl: 48
 
 database: data/betedge.db
 reports_dir: reports

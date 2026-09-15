@@ -30,7 +30,7 @@ from .config import Config
 from .db import Database
 from .markets import SPORTS, core_markets_for, expand_sport_keys, markets_for
 from .oddsapi import OddsApiClient
-from .scan import best_per_selection, cap_exposure, scan
+from .scan import _events_in_window, best_per_selection, cap_exposure, scan
 
 
 def build_client(cfg: Config) -> OddsApiClient:
@@ -107,33 +107,93 @@ def cmd_sports(cfg: Config, args) -> int:
 
 
 def cmd_quota(cfg: Config, args) -> int:
+    """
+    What the configuration costs, and what the plan affords.
+
+    Every call this makes is free -- /sports and /events are unbilled -- so
+    it can be run as often as you like. The point is to answer the question
+    that decides everything else: how often can this configuration run?
+    """
     client = build_client(cfg)
     q = client.probe_quota()
-    print(f"Credits remaining : {q.remaining:,}" if q.remaining is not None else "unknown")
-    print(f"Credits used      : {q.used:,}" if q.used is not None else "")
-    for sport in cfg.sports:
-        markets = cfg.markets_for_sport(sport, cfg.model.include_alternate_lines)
-        try:
-            events = client.events(sport)
-        except Exception as exc:  # noqa: BLE001
-            print(f"{sport}: {exc}")
-            continue
-        cost = len(events) * len(markets)
-        print(
-            f"{sport:30} {len(events):3d} events x {len(markets):2d} markets "
-            f"= up to {cost:,} credits per prop scan"
-        )
+    if q.remaining is not None:
+        print(f"Credits remaining : {q.remaining:,}")
+    if q.used is not None:
+        print(f"Credits used      : {q.used:,}")
 
+    live = [s["key"] for s in client.sports()]
+
+    # ---- game-level sweep -------------------------------------------
+    core_total = 0
+    core_rows = []
     if cfg.core_sports:
-        live = [s["key"] for s in client.sports()]
-        resolved = expand_sport_keys(cfg.core_sports, live)
-        total = 0
-        print()
-        for sport in resolved:
-            n = len(core_markets_for(sport))
-            total += n
-            print(f"{sport:30} {n:2d} core markets = {n} credits for the whole sport")
-        print(f"{'':30} core total: {total} credits per sweep")
+        for sport in expand_sport_keys(cfg.core_sports, live):
+            n = len(cfg.core_markets_for_sport(sport))
+            core_total += n
+            core_rows.append((sport, n))
+
+    if core_rows:
+        print("\nGame-level sweep (whole sport per call):")
+        for sport, n in core_rows:
+            print(f"  {sport:34} {n:2d} credit" + ("s" if n != 1 else ""))
+        print(f"  {'':34} {'-' * 10}")
+        print(f"  {'one full sweep':34} {core_total:2d} credits")
+
+    # ---- prop pass ---------------------------------------------------
+    prop_total = 0
+    if cfg.sports:
+        print("\nPlayer props (per event, per market):")
+        for sport in cfg.sports:
+            markets = cfg.markets_for_sport(sport, cfg.model.include_alternate_lines)
+            try:
+                events = client.events(sport)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  {sport:34} unavailable: {exc}")
+                continue
+            window = cfg.prop_window_hours(sport)
+            in_window = _events_in_window(events, datetime.now(timezone.utc), cfg,
+                                          max_hours=window)
+            cost = len(in_window) * len(markets)
+            prop_total += cost
+            print(
+                f"  {sport:34} {len(in_window):2d} events (of {len(events)} "
+                f"posted, {window:.0f}h window) x {len(markets)} markets "
+                f"= {cost:,} credits"
+            )
+        print(f"  {'':34} {'-' * 10}")
+        print(f"  {'one full prop pass':34} {prop_total:,} credits")
+
+    # ---- what the plan affords ---------------------------------------
+    per_run = core_total + prop_total
+    if per_run <= 0:
+        print("\nNothing configured to scan.")
+        return 0
+
+    monthly = cfg.budget.monthly_credits
+    usable = max(0, monthly - cfg.budget.reserve)
+    print(f"\nOne `betedge daily` right now: about {per_run:,} credits.")
+    print(
+        f"Plan: {monthly:,}/month, {cfg.budget.reserve:,} reserved for closing "
+        f"lines, so {usable:,} to scan with."
+    )
+    if core_total:
+        print(
+            f"  Game lines alone ({core_total} credits) would run "
+            f"{usable // core_total:,} times a month "
+            f"-- about {usable // core_total // 30:,} an hour, every day."
+        )
+    runs_per_day = usable / 30.0 / per_run if per_run else 0
+    print(f"  This full configuration: about {runs_per_day:.1f} runs a day.")
+    if runs_per_day < 1:
+        print(
+            "  That is under once a day. Narrow `prop_markets`, tighten "
+            "`prop_windows`, or scan game lines only with --no-props."
+        )
+    elif runs_per_day > 12:
+        print(
+            "  Comfortable. Prices at the soft books move in minutes, so "
+            "run it hourly rather than saving the credits."
+        )
     return 0
 
 

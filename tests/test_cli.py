@@ -195,3 +195,19 @@ class TestShownIdsAreUsable:
             "SELECT id FROM opportunities WHERE suspect=0")]
         db.close()
         assert ids and all(str(i) in out for i in ids)
+
+
+class TestQuota:
+    def test_it_projects_what_the_plan_affords(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        assert run(["--config", str(cfg_path), "quota"]) == 0
+        out = capsys.readouterr().out
+        assert "Credits remaining" in out
+        assert "Game-level sweep" in out
+        assert "runs a day" in out
+
+    def test_it_spends_nothing(self, wired):
+        """/sports and /events are unbilled, so this must stay free."""
+        cfg_path, client, _ = wired
+        run(["--config", str(cfg_path), "quota"])
+        assert client.quota.spent_this_session == 0

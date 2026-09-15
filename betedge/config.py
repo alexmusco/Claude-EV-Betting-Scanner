@@ -159,6 +159,18 @@ class Config:
     # credits to ~30. Anything not listed here uses the full set from
     # markets.py.
     prop_markets: dict[str, list[str]] = field(default_factory=dict)
+    # Per-sport override of how far ahead the PROP pass will look, in hours.
+    # Cost is markets x events, so looking three days out at a sport whose
+    # lines are placeholders until game day is the most expensive way to
+    # scan nothing. MLB is the clear case: batter props void if the player
+    # does not start and pitcher props void on a scratch, so before lineups
+    # post -- two to four hours out -- the numbers are not real prices.
+    prop_windows: dict[str, float] = field(default_factory=dict)
+    # Per-sport override of the game-level market list, same idea as
+    # prop_markets. The bulk endpoint bills for markets REQUESTED, not
+    # returned, so asking MMA for spreads and totals it does not price costs
+    # two credits a sweep for nothing.
+    core_markets: dict[str, list[str]] = field(default_factory=dict)
     database: str = "data/betedge.db"
     reports_dir: str = "reports"
 
@@ -178,6 +190,8 @@ class Config:
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
             prop_markets=raw.get("prop_markets", {}) or {},
+            prop_windows=raw.get("prop_windows", {}) or {},
+            core_markets=raw.get("core_markets", {}) or {},
             database=raw.get("database", "data/betedge.db"),
             reports_dir=raw.get("reports_dir", "reports"),
         )
@@ -193,6 +207,20 @@ class Config:
         if override:
             return list(override)
         return markets_for(sport, include_alternate=include_alternate)
+
+    def core_markets_for_sport(self, sport: str) -> list[str]:
+        """Game-level markets to request: the config override, else the
+        registry default."""
+        from .markets import core_markets_for
+
+        override = self.core_markets.get(sport)
+        if override:
+            return list(override)
+        return core_markets_for(sport)
+
+    def prop_window_hours(self, sport: str) -> float:
+        """How far ahead the prop pass looks for one sport."""
+        return float(self.prop_windows.get(sport, self.model.max_hours_to_start))
 
     def to_dict(self) -> dict:
         d = asdict(self)
