@@ -127,7 +127,10 @@ def cmd_quota(cfg: Config, args) -> int:
     core_total = 0
     core_rows = []
     if cfg.core_sports:
-        for sport in expand_sport_keys(cfg.core_sports, live):
+        resolved, blocked = cfg.allowed(expand_sport_keys(cfg.core_sports, live))
+        for sport in blocked:
+            print(f"  {sport:34} excluded (see excluded_sports)")
+        for sport in resolved:
             n = len(cfg.core_markets_for_sport(sport))
             core_total += n
             core_rows.append((sport, n))
@@ -143,7 +146,10 @@ def cmd_quota(cfg: Config, args) -> int:
     prop_total = 0
     if cfg.sports:
         print("\nPlayer props (per event, per market):")
-        for sport in cfg.sports:
+        prop_sports, prop_blocked = cfg.allowed(cfg.sports)
+        for sport in prop_blocked:
+            print(f"  {sport:34} excluded (see excluded_sports)")
+        for sport in prop_sports:
             markets = cfg.markets_for_sport(sport, cfg.model.include_alternate_lines)
             try:
                 events = client.events(sport)

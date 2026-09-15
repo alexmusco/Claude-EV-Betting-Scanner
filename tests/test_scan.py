@@ -385,3 +385,68 @@ class TestCreditSaving:
         cfg.core_sports = ["baseball_mlb"]
         scan(cfg, client, now=now)
         assert client.quota.spent_this_session == 3
+
+
+class TestExcludedSports:
+    """
+    Oregon prohibits collegiate wagering, so DraftKings will not take the
+    bet. A flagged NCAA edge is wasted credits and a wasted look, and the
+    exclusion has to hold against every route in -- config, CLI override,
+    and wildcard expansion alike.
+    """
+
+    def test_college_is_blocked_by_default(self, cfg):
+        for key in ("americanfootball_ncaaf", "basketball_ncaab",
+                    "basketball_wncaab", "baseball_ncaa"):
+            assert cfg.is_excluded(key), key
+
+    def test_professional_sports_are_untouched(self, cfg):
+        for key in ("americanfootball_nfl", "basketball_nba", "baseball_mlb",
+                    "icehockey_nhl", "tennis_wta_guadalajara_open",
+                    "mma_mixed_martial_arts"):
+            assert not cfg.is_excluded(key), key
+
+    def test_no_core_call_is_made_for_a_blocked_sport(self, cfg, now):
+        client = FakeClient(bulk_odds={"americanfootball_ncaaf": [nfl_game()]})
+        cfg.core_sports = ["americanfootball_ncaaf"]
+        result = scan(cfg, client, now=now)
+        assert client.calls["odds"] == 0
+        assert client.quota.spent_this_session == 0
+        assert result.rejections.get("sport_excluded") == 1
+
+    def test_no_prop_call_is_made_for_a_blocked_sport(self, cfg, now):
+        client = FakeClient(events_by_sport={"basketball_ncaab": [
+            {"id": "x", "commence_time": (NOW + timedelta(hours=6)).isoformat()}]})
+        cfg.sports = ["basketball_ncaab"]
+        scan(cfg, client, now=now)
+        assert client.calls["events"] == 0
+        assert client.calls["event_odds"] == 0
+
+    def test_a_wildcard_cannot_smuggle_a_blocked_sport_back_in(self, cfg, now):
+        """The route that matters: exclusions are applied AFTER expansion."""
+        client = FakeClient(
+            sports_list=[{"key": "americanfootball_nfl"},
+                         {"key": "americanfootball_ncaaf"}],
+            bulk_odds={"americanfootball_nfl": [], "americanfootball_ncaaf": []},
+        )
+        cfg.core_sports = ["americanfootball_*"]
+        result = scan(cfg, client, now=now)
+        assert "americanfootball_nfl" in result.sports
+        assert "americanfootball_ncaaf" not in result.sports
+        assert client.quota.spent_this_session == 3, "one sport swept, not two"
+
+    def test_a_blocked_sport_does_not_stop_the_others(self, cfg, now):
+        client = FakeClient(bulk_odds={"baseball_mlb": [nfl_game()],
+                                       "basketball_ncaab": []})
+        cfg.core_sports = ["basketball_ncaab", "baseball_mlb"]
+        result = scan(cfg, client, now=now)
+        assert result.opportunities
+        assert "baseball_mlb" in result.sports
+
+    def test_the_block_list_is_configurable(self, cfg, now):
+        """Someone in a state that permits it can opt back in."""
+        cfg.excluded_sports = []
+        client = FakeClient(bulk_odds={"americanfootball_ncaaf": []})
+        cfg.core_sports = ["americanfootball_ncaaf"]
+        scan(cfg, client, now=now)
+        assert client.calls["odds"] == 1

@@ -154,6 +154,17 @@ class Config:
     # trailing '*' matches by prefix, which is how you follow tennis, whose
     # sport keys rotate tournament by tournament.
     core_sports: list[str] = field(default_factory=list)
+    # Sports never to scan, whatever else asks for them. Patterns may carry
+    # a wildcard anywhere. This is enforced after every other selection --
+    # config lists, CLI overrides and wildcard expansion alike -- so a
+    # blocked sport cannot be reintroduced by a flag.
+    #
+    # Defaults to excluding college sports: Oregon prohibits collegiate
+    # wagering, so DraftKings will not take the bet and a flagged NCAA
+    # edge is wasted credits and a wasted look.
+    excluded_sports: list[str] = field(
+        default_factory=lambda: ["*ncaa*"]
+    )
     # Narrow the prop markets for a sport. Cost is markets x events, so
     # cutting MLB from ten markets to two takes a daily scan from ~150
     # credits to ~30. Anything not listed here uses the full set from
@@ -189,6 +200,11 @@ class Config:
             budget=BudgetConfig(**raw.get("budget", {})),
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
+            excluded_sports=(
+                raw["excluded_sports"]
+                if isinstance(raw.get("excluded_sports"), list)
+                else ["*ncaa*"]
+            ),
             prop_markets=raw.get("prop_markets", {}) or {},
             prop_windows=raw.get("prop_windows", {}) or {},
             core_markets=raw.get("core_markets", {}) or {},
@@ -207,6 +223,19 @@ class Config:
         if override:
             return list(override)
         return markets_for(sport, include_alternate=include_alternate)
+
+    def is_excluded(self, sport: str) -> bool:
+        """Whether this sport is off limits."""
+        from .markets import matches_any
+
+        return matches_any(sport, self.excluded_sports)
+
+    def allowed(self, sports: list[str]) -> tuple[list[str], list[str]]:
+        """Split a sport list into (scannable, blocked)."""
+        keep, blocked = [], []
+        for s in sports:
+            (blocked if self.is_excluded(s) else keep).append(s)
+        return keep, blocked
 
     def core_markets_for_sport(self, sport: str) -> list[str]:
         """Game-level markets to request: the config override, else the

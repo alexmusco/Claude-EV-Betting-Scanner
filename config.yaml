@@ -125,11 +125,27 @@ core_sports:
   - "tennis_*"              # Pinnacle is THE reference book here; US books lag
   - baseball_mlb            # moneyline, run line and totals: 3 credits
   - americanfootball_nfl
-  - americanfootball_ncaaf  # the edge is in games nobody watches
   - mma_mixed_martial_arts  # moneyline only, so 1 credit
   # - basketball_nba        # uncomment late October
   # - icehockey_nhl         # uncomment October
-  # - basketball_ncaab      # uncomment November
+
+# ---------------------------------------------------------------------------
+# SPORTS NEVER TO SCAN, whatever else asks for them.
+#
+# Oregon prohibits collegiate wagering, so DraftKings will not take an NCAA
+# bet. Scanning college is therefore worse than useless: it spends credits
+# to surface edges you cannot act on, and pushes real bets down the list.
+#
+# This is enforced in the scan engine rather than by leaving college out of
+# the lists above, so `--sports basketball_ncaab` and a wildcard like
+# `americanfootball_*` are both caught too. Patterns take a wildcard
+# anywhere; '*ncaa*' covers ncaaf, ncaab, wncaab and the baseball key,
+# which share no common prefix.
+#
+# Empty this list if you ever bet somewhere that allows it.
+# ---------------------------------------------------------------------------
+excluded_sports:
+  - "*ncaa*"
 
 # Narrow the game-level market list for one sport. The bulk endpoint bills
 # for markets REQUESTED, not returned, so asking for markets a sport does

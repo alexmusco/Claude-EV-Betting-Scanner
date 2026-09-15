@@ -232,3 +232,30 @@ class TestTrackerExport:
         out = tmp_path / "bets.csv"
         assert run(["--config", str(cfg_path), "export", str(out)]) == 0
         assert out.exists()
+
+
+class TestExclusionsSurviveOverrides:
+    def test_a_cli_sports_override_cannot_reach_a_blocked_sport(self, wired, capsys):
+        """`--sports basketball_ncaab` is the obvious way to bypass a config
+        list, so the guard has to sit below the override, not in it."""
+        cfg_path, client, _ = wired
+        run(["--config", str(cfg_path), "scan", "--no-report",
+             "--sports", "basketball_ncaab"])
+        assert client.calls["event_odds"] == 0
+
+    def test_a_cli_core_sports_override_cannot_either(self, wired, capsys):
+        cfg_path, client, _ = wired
+        run(["--config", str(cfg_path), "scan", "--no-report", "--no-props",
+             "--core-sports", "americanfootball_ncaaf"])
+        assert client.calls["odds"] == 0
+        assert client.quota.spent_this_session == 0
+
+    def test_quota_marks_a_blocked_sport_rather_than_pricing_it(self, wired, capsys, tmp_path):
+        import yaml
+        cfg_file = wired[0]
+        raw = yaml.safe_load(cfg_file.read_text())
+        raw["core_sports"] = ["americanfootball_ncaaf", "baseball_mlb"]
+        cfg_file.write_text(yaml.safe_dump(raw))
+        run(["--config", str(cfg_file), "quota"])
+        out = capsys.readouterr().out
+        assert "americanfootball_ncaaf" in out and "excluded" in out

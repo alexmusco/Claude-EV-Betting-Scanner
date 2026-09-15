@@ -623,6 +623,15 @@ def _scan_core_markets(
             live = []
         core_sports = expand_sport_keys(core_sports, live)
 
+    # After expansion, not before: a wildcard resolved against the live
+    # sport list is exactly how a blocked sport would otherwise creep in.
+    core_sports, blocked = cfg.allowed(core_sports)
+    for sport in blocked:
+        log.info("%s is excluded, skipping", sport)
+        state.rejections["sport_excluded"] = (
+            state.rejections.get("sport_excluded", 0) + 1
+        )
+
     swept: list[str] = []
     for sport in core_sports:
         markets = cfg.core_markets_for_sport(sport)
@@ -662,6 +671,13 @@ def _scan_props(
     state: _ScanState,
 ) -> None:
     """Player props off the per-event endpoint. Costs markets x events."""
+    sports, blocked = cfg.allowed(list(sports))
+    for sport in blocked:
+        log.info("%s is excluded, skipping", sport)
+        state.rejections["sport_excluded"] = (
+            state.rejections.get("sport_excluded", 0) + 1
+        )
+
     for sport in sports:
         if state.budget_exhausted:
             break

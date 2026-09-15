@@ -374,8 +374,33 @@ Configured in `markets.py`; run `bet sports` for the live list.
 | NHL | 5 markets | Shots on goal and blocked shots are reliably soft. Lower volume, slower correction. |
 | MLB | 10 markets, narrow it | Pitcher strikeouts and batter total bases are the targets. Games every day, Apr–Oct. Core markets are 3 credits for the whole slate. |
 | EPL / UCL / La Liga / Serie A / Bundesliga | 3 markets | Pinnacle is very sharp on soccer but its *prop* coverage is thin. Put soccer in `core_sports`, not `sports`. |
-| NCAAB / NCAAF | inherited | The edge is in games nobody watches. Prop coverage patchy. |
+| NCAAB / NCAAF | **blocked** | Oregon prohibits collegiate wagering, so these are excluded in the engine, not just left out of the config. See below. |
 | MMA | none | Moneyline only, so `core_markets` narrows it to 1 credit. Pinnacle is sharp and soft books are slow on fight-week news. |
+
+### Sports you cannot bet
+
+Oregon permits no collegiate wagering, so DraftKings will not take an NCAA
+bet. Scanning college is worse than useless — it spends credits surfacing
+edges you cannot act on and pushes real bets down the list.
+
+`excluded_sports` in `config.yaml` blocks them, and it is enforced in the
+scan engine rather than by omission from the sport lists:
+
+```yaml
+excluded_sports:
+  - "*ncaa*"
+```
+
+That placement is the point. Leaving college out of `core_sports` would be
+undone by `--core-sports americanfootball_*`, or by `--sports
+basketball_ncaab`, or by a wildcard resolving against a live sport list
+that happens to include a college key. The check sits below all three, so
+no billed call is ever made for a blocked sport. `bet quota` marks them
+`excluded` rather than pricing them.
+
+Patterns take a wildcard anywhere — `*ncaa*` is needed because
+`americanfootball_ncaaf`, `basketball_ncaab`, `basketball_wncaab` and
+`baseball_ncaa` share no usable prefix.
 
 ---
 

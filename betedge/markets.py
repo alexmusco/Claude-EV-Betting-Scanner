@@ -23,6 +23,7 @@ let the API tell you what exists.
 
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -275,6 +276,19 @@ def expand_sport_keys(patterns: Sequence[str], available: Sequence[str]) -> list
             seen.add(pattern)
             resolved.append(pattern)
     return resolved
+
+
+def matches_any(sport_key: str, patterns: Sequence[str]) -> bool:
+    """
+    Whether a sport key matches any of the given glob patterns.
+
+    Unlike expand_sport_keys, which only understands a trailing '*', this
+    accepts a wildcard anywhere -- '*ncaa*' has to match
+    americanfootball_ncaaf, basketball_ncaab and basketball_wncaab alike,
+    and those share no usable prefix.
+    """
+    key = (sport_key or "").lower()
+    return any(fnmatch.fnmatch(key, p.lower()) for p in patterns)
 
 
 def get_sport(key: str) -> Sport:
