@@ -950,19 +950,22 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
             continue
         print(f"\n{row.sport} by book:")
         sub = (
-            f"  {'book':<16} {'quotes':>8} {'on a pinnacle market':>21} "
-            f"{'same line':>10} {'usable':>7} {'players':>8}"
+            f"  {'book':<16} {'kind':<9} {'props':>7} {'matched':>8} "
+            f"{'match':>6} {'per game':>9} {'players':>8}"
         )
         print(sub)
         print("  " + "-" * (len(sub) - 2))
         for book in sorted(
-            row.by_book.values(), key=lambda b: -b.matched_on_same_line
+            row.by_book.values(), key=lambda b: (not b.is_pickem, -b.props)
         ):
+            note = "" if book.usable else "  too thin"
+            if book.thin:
+                note = "  thin"
             print(
-                f"  {book.book:<16} {book.quotes:>8,} "
-                f"{book.on_a_pinnacle_market:>21,} "
-                f"{book.matched_on_same_line:>10,} {book.match_rate:>6.0%} "
-                f"{len(book.players):>8,}"
+                f"  {book.book:<16} {'pickem' if book.is_pickem else 'parlay':<9} "
+                f"{book.quotes // 2:>7,} {book.props:>8,} "
+                f"{book.match_rate:>5.0%} {book.props_per_event:>9.1f} "
+                f"{len(book.players):>8,}{note}"
             )
         if row.silent_books:
             print(
@@ -970,11 +973,14 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
             )
 
     print(
-        "\n'same line' is the number that matters: a pick'em line compared "
-        "against\nPinnacle at a different number is not a measurement, so those "
-        "legs are\ndropped rather than approximated. A book with plenty of "
-        "quotes and a low\nmatch rate is posting numbers Pinnacle does not "
-        "price, and is worth little here."
+        "\n'matched' counts distinct props, not quotes -- every prop is posted "
+        "on both\nsides, so a quote count reads twice as deep as the board "
+        "really is. A leg\ncompared against a line Pinnacle does not price is "
+        "not a measurement, so it is\ndropped rather than approximated; a low "
+        "match rate usually means a book posting\nalternate lines nobody sharp "
+        "prices.\n\n'per game' is what decides whether tickets can be built at "
+        "all. Legs are grouped\nby game, so a book with forty usable props "
+        "spread over fifteen games can still\nbe unable to fill one ticket."
     )
 
     silent = sorted({b for row in report.rows for b in row.silent_books})
@@ -998,16 +1004,30 @@ def cmd_parlay_coverage(cfg: Config, args) -> int:
     elif usable:
         print(f"\nUsable today: {', '.join(usable)}")
         print("Put these in `sports:` in config.yaml for the prop pass.")
-        best = {
-            row.sport: row.best_book for row in report.rows if row.best_book
-        }
-        for sport, book in sorted(best.items()):
-            if book.usable:
+        for row in sorted(report.rows, key=lambda r: r.sport):
+            book = row.best_pickem_book
+            if book is not None and book.usable:
                 print(
-                    f"  {sport}: most usable legs from {book.book} "
-                    f"({book.matched_on_same_line:,} matched). Put it in "
-                    "`parlay.pickem_books`."
+                    f"  {row.sport}: best pick'em book is {book.book} "
+                    f"({book.props:,} props, {book.props_per_event:.1f} a game)."
+                    + ("  Thin -- expect few tickets." if book.thin else "")
                 )
+            elif book is not None:
+                print(
+                    f"  {row.sport}: no pick'em book has enough props per game "
+                    f"to fill a ticket (best is {book.book} at "
+                    f"{book.props_per_event:.1f}; {P.MIN_PROPS_PER_EVENT} needed)."
+                )
+            # A sportsbook is reported, never recommended as a pick'em book:
+            # it prices its own parlays rather than paying a fixed ladder.
+            for other in row.parlay_books:
+                if other.usable:
+                    print(
+                        f"  {row.sport}: {other.book} is a sportsbook, not a "
+                        f"pick'em site -- its parlays are priced by the book. "
+                        f"Use it with `--products draftkings_parlay`, not in "
+                        f"`parlay.pickem_books`."
+                    )
     else:
         print(
             "\nNothing has usable coverage right now. Out of season, the "

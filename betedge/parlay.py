@@ -1911,9 +1911,15 @@ def _leg_serves(leg: Leg, product: Product, cfg: Config) -> bool:
 #: what came back, rather than to assert it from memory.
 PICKEM_BOOK_CANDIDATES = ("underdog", "prizepicks")
 
-#: Minimum matched legs before a pool is worth searching. Two legs is a
-#: ticket, but a pool that small produces nothing worth having.
-USABLE_MATCHED_LEGS = 8
+#: Distinct props ONE GAME must offer before tickets can be built from it.
+#: Measured per event because grouping is same-game: a book with forty
+#: usable props spread thinly over fifteen games can still be unable to
+#: fill a single ticket. Three is the bare minimum -- it allows one
+#: three-leg ticket and no choice at all.
+MIN_PROPS_PER_EVENT = 3
+#: Below this there is a pool but barely a search, so the board is worth
+#: flagging as thin rather than reporting as healthy.
+THIN_PROPS_PER_EVENT = 6
 
 
 @dataclass
@@ -1926,6 +1932,34 @@ class BookCoverage:
     matched_on_same_line: int = 0   #: ...and on the same line, so usable
     players: set = field(default_factory=set)
     markets: set = field(default_factory=set)
+    #: Distinct (market, player, line) that matched. A prop is quoted on
+    #: both sides, so the raw quote count is double the number of actual
+    #: props and reads twice as deep as the board really is.
+    matched_props: set = field(default_factory=set)
+    events_probed: int = 0
+
+    @property
+    def is_pickem(self) -> bool:
+        """
+        Whether this book is a fixed-multiplier pick'em site.
+
+        The distinction the recommendation turns on. A sportsbook prices
+        its own parlays and belongs nowhere near `parlay.pickem_books`,
+        however many lines it posts -- and it will post more, because it
+        carries alternate lines that no pick'em site offers and that
+        Pinnacle mostly does not price either.
+        """
+        return self.book in PICKEM_BOOK_CANDIDATES
+
+    @property
+    def props(self) -> int:
+        return len(self.matched_props)
+
+    @property
+    def props_per_event(self) -> float:
+        if not self.events_probed:
+            return 0.0
+        return self.props / self.events_probed
 
     @property
     def match_rate(self) -> float:
@@ -1943,7 +1977,15 @@ class BookCoverage:
 
     @property
     def usable(self) -> bool:
-        return self.matched_on_same_line >= USABLE_MATCHED_LEGS
+        # Judged on distinct props per game. Counting both sides of each
+        # prop made a board look twice as deep as it is, and counting
+        # across the whole slate hid that no single game could fill a
+        # ticket.
+        return self.props_per_event >= MIN_PROPS_PER_EVENT
+
+    @property
+    def thin(self) -> bool:
+        return self.usable and self.props_per_event < THIN_PROPS_PER_EVENT
 
 
 @dataclass
@@ -2004,6 +2046,29 @@ class CoverageRow:
             self.by_book.values(),
             key=lambda b: b.matched_on_same_line,
             default=None,
+        )
+
+    @property
+    def best_pickem_book(self) -> "BookCoverage | None":
+        """
+        The pick'em site with the most usable legs.
+
+        Restricted to pick'em sites on purpose. A sportsbook will usually
+        top the raw count -- it posts alternate lines that no pick'em site
+        does -- and recommending it for `parlay.pickem_books` would be a
+        category error: its parlays are priced by the book, not by a
+        fixed ladder.
+        """
+        candidates = [b for b in self.by_book.values() if b.is_pickem]
+        return max(
+            candidates, key=lambda b: b.matched_on_same_line, default=None
+        )
+
+    @property
+    def parlay_books(self) -> list["BookCoverage"]:
+        return sorted(
+            (b for b in self.by_book.values() if not b.is_pickem),
+            key=lambda b: -b.matched_on_same_line,
         )
 
     @property
@@ -2097,6 +2162,7 @@ def probe_coverage(
             for q in book_quotes:
                 seen = row.by_book.setdefault(q.book, BookCoverage(book=q.book))
                 seen.quotes += 1
+                seen.events_probed = row.events_probed
                 seen.players.add(q.selection)
                 seen.markets.add(q.market)
                 rungs = ladder.get((q.market, q.selection))
@@ -2106,6 +2172,7 @@ def probe_coverage(
                 row.with_book_quote += 1
                 if float(q.line) in rungs:
                     seen.matched_on_same_line += 1
+                    seen.matched_props.add((q.market, q.selection, float(q.line)))
                     row.matched_on_same_line += 1
         row.books_asked = tuple(target_books)
         row.credits_spent = client.quota.spent_this_session - before

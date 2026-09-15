@@ -1265,6 +1265,41 @@ class TestCoverageByBook:
         row = self.probe(pcfg, two_book_event())
         assert set(row.by_book) == {"underdog", "prizepicks"}
 
+    def test_props_are_counted_once_not_once_per_side(self, pcfg):
+        # A prop is quoted Over and Under, so the raw quote count is
+        # double the number of actual props.
+        from fixtures import two_book_event
+
+        book = self.probe(pcfg, two_book_event()).by_book["underdog"]
+        assert book.quotes == 2 * len(KC_STACK)
+        assert book.props == len(KC_STACK)
+
+    def test_a_sportsbook_is_not_a_pickem_book(self, pcfg):
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event(
+            books_and_shifts=(("draftkings", 0.0), ("prizepicks", 0.0))
+        ))
+        assert not row.by_book["draftkings"].is_pickem
+        assert row.by_book["prizepicks"].is_pickem
+
+    def test_the_pickem_recommendation_never_names_a_sportsbook(self, pcfg):
+        # DraftKings posts alternate lines no pick'em site does, so it
+        # usually tops the raw count -- and recommending it for
+        # parlay.pickem_books would be a category error.
+        from fixtures import two_book_event
+
+        spec = KC_STACK + [
+            ("player_receptions", "Travis Kelce", 5.5, (1.70, 2.25)),
+            ("player_pass_tds", "Patrick Mahomes", 1.5, (1.80, 2.05)),
+        ]
+        row = self.probe(pcfg, two_book_event(
+            spec=spec, books_and_shifts=(("draftkings", 0.0), ("prizepicks", 0.0))
+        ))
+        assert row.best_book.book in ("draftkings", "prizepicks")
+        assert row.best_pickem_book.book == "prizepicks"
+        assert [b.book for b in row.parlay_books] == ["draftkings"]
+
     def test_a_book_on_pinnacles_line_matches_and_one_off_it_does_not(self, pcfg):
         from fixtures import two_book_event
 
@@ -1324,6 +1359,21 @@ class TestCoverageByBook:
         row = self.probe(pcfg, two_book_event())
         assert row.usable
         assert not row.by_book["prizepicks"].usable
+
+    def test_a_board_too_thin_to_fill_one_game_is_not_usable(self, pcfg):
+        # Same-game grouping means legs must come from ONE game, so two
+        # props per game cannot fill a ticket however many games there are.
+        from fixtures import two_book_event
+
+        row = self.probe(pcfg, two_book_event(spec=KC_STACK[:2]))
+        assert row.by_book["underdog"].props_per_event == 2
+        assert not row.by_book["underdog"].usable
+
+    def test_a_barely_usable_board_is_flagged_thin(self, pcfg):
+        from fixtures import two_book_event
+
+        book = self.probe(pcfg, two_book_event()).by_book["underdog"]
+        assert book.usable and book.thin
 
     def test_a_sport_is_not_usable_when_no_book_matches_lines(self, pcfg):
         from fixtures import two_book_event

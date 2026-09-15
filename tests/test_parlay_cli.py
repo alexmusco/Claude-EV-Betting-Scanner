@@ -785,14 +785,44 @@ class TestCoverageByBookCommand:
         assert "by book:" in out
         assert "underdog" in out and "prizepicks" in out
 
-    def test_it_names_the_book_worth_using(self, wired, capsys):
+    def test_it_names_the_pickem_book_worth_using(self, wired, capsys):
+        cfg_path, client, _tmp = wired
+        self.wire_two_books(client)
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "best pick'em book is underdog" in out
+
+    def test_a_sportsbook_is_reported_but_never_recommended(self, wired, capsys):
+        # DraftKings tops the raw count because it posts alternate lines
+        # no pick'em site does. Recommending it for parlay.pickem_books
+        # would be a category error -- it prices its own parlays.
+        cfg_path, client, _tmp = wired
+        from fixtures import KC_STACK
+
+        spec = KC_STACK + [
+            ("player_receptions", "Travis Kelce", 5.5, (1.70, 2.25)),
+            ("player_pass_tds", "Patrick Mahomes", 1.5, (1.80, 2.05)),
+        ]
+        client._event_odds[("americanfootball_nfl", "kc1")] = two_book_event(
+            spec=spec,
+            books_and_shifts=(("draftkings", 0.0), ("prizepicks", 0.0)),
+        )
+        run(["--config", str(cfg_path), "parlay", "coverage",
+             "--sports", "americanfootball_nfl"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "best pick'em book is prizepicks" in out
+        assert "draftkings is a sportsbook, not a pick'em site" in out
+        assert "--products draftkings_parlay" in out
+
+    def test_it_shows_props_per_game(self, wired, capsys):
         cfg_path, client, _tmp = wired
         self.wire_two_books(client)
         run(["--config", str(cfg_path), "parlay", "coverage",
              "--sports", "americanfootball_nfl"])
         out = capsys.readouterr().out
-        assert "most usable legs from underdog" in out
-        assert "parlay.pickem_books" in out
+        assert "per game" in out
+        assert "pickem" in out
 
     def test_a_book_that_never_answers_is_called_out(self, wired, capsys):
         cfg_path, client, _tmp = wired

@@ -823,6 +823,19 @@ line** — the number that actually decides usability. A book can post a
 thousand props and be worth nothing here if it prices them at numbers
 Pinnacle does not touch, and only a per-book match rate shows that.
 
+Two columns decide it. **`matched`** counts distinct props, not quotes —
+every prop is posted on both sides, so a quote count reads twice as deep
+as the board really is. **`per game`** is what decides whether tickets can
+be built at all: legs are grouped by game, so a book with forty usable
+props spread over fifteen games can still be unable to fill one ticket.
+
+The recommendation only ever names a **pick'em** book. A sportsbook
+usually tops the raw count — it posts alternate lines no pick'em site
+does, and that is also why its match rate against Pinnacle is low — but
+its parlays are priced by the book rather than paid on a fixed ladder, so
+it belongs in `--products draftkings_parlay`, never in
+`parlay.pickem_books`.
+
 A probe only reports on books it actually asked. With no event inside the
 window nothing is probed and no book is asked anything, so the run says
 that plainly instead of listing every book as silent — which would read
@@ -876,7 +889,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          792 tests; no network, no credits spent
+tests/          799 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 
