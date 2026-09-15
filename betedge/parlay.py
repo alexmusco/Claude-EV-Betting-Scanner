@@ -542,9 +542,19 @@ class Leg:
 
     @property
     def identity(self) -> tuple:
-        """What makes two legs the same bet, for deduplication."""
-        return (self.event_id, self.market, (self.selection or "").lower(),
-                (self.side or "").lower(), self.line)
+        """
+        What makes two legs the same bet, for deduplication.
+
+        The BOOK is part of it. Two sites quoting the same player on the
+        same line are two different bets -- they pay on different ladders,
+        and a PrizePicks 3-pick at 5x is not an Underdog 3-pick at 6x.
+        Leaving the book out silently dropped the second site's copy of
+        every prop the first one also posted, which with both books
+        configured is most of them.
+        """
+        return (self.book, self.event_id, self.market,
+                (self.selection or "").lower(), (self.side or "").lower(),
+                self.line)
 
     @property
     def prop_identity(self) -> tuple:
@@ -1603,6 +1613,16 @@ class ParlayScanResult:
     errors: list[str] = field(default_factory=list)
     rosters: RosterBook | None = None
     roster_refresh: Any = None
+    #: Books the scan asked for, and how many legs each actually produced.
+    #: A configured book with zero legs is the difference between "no edge
+    #: today" and "your feed does not carry that book", and those look
+    #: identical in an empty board unless the scan says which.
+    books_requested: list = field(default_factory=list)
+    legs_by_book: dict = field(default_factory=dict)
+
+    @property
+    def silent_books(self) -> list[str]:
+        return [b for b in self.books_requested if not self.legs_by_book.get(b)]
 
     @property
     def team_coverage(self) -> dict[str, int]:
@@ -1792,6 +1812,9 @@ def scan_parlays(
             )
 
     state.legs_built = len(all_legs)
+    state.books_requested = list(target_books)
+    for leg in all_legs:
+        state.legs_by_book[leg.book] = state.legs_by_book.get(leg.book, 0) + 1
     state.rosters = context.rosters
     state.roster_refresh = context.refresh
     state.tickets = build_tickets(

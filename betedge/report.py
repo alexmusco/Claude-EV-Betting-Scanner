@@ -582,6 +582,26 @@ def parlay_summary(result) -> str:
             else ""
         ),
     ]
+    if result.legs_by_book:
+        lines.append(
+            "Legs by book: "
+            + ", ".join(
+                f"{book} ({n:,})"
+                for book, n in sorted(
+                    result.legs_by_book.items(), key=lambda kv: -kv[1]
+                )
+            )
+        )
+    for book in result.silent_books:
+        # Named, not left as an absence. An empty board from a book you
+        # configured means one of two completely different things -- no
+        # usable lines today, or a book your feed does not carry at all --
+        # and only one of them is worth waiting out.
+        lines.append(
+            f"No legs at all from {book}: it quoted nothing this scan could "
+            f"use. `betedge parlay coverage` says whether your feed carries "
+            f"it."
+        )
     if result.rejections:
         top = sorted(result.rejections.items(), key=lambda kv: -kv[1])[:6]
         lines.append("Filtered out: " + ", ".join(f"{k} ({v:,})" for k, v in top))

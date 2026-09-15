@@ -1301,9 +1301,12 @@ class TestCoverageByBook:
         assert row.silent_books == ["prizepicks"]
 
     def test_the_candidates_are_probed_even_when_not_configured(self, pcfg):
+        # The probe is exploratory: it asks about every known pick'em site
+        # whether or not you bet there, because ten books bill as one and
+        # the point is to find out what is available.
         from fixtures import two_book_event
 
-        assert "prizepicks" not in pcfg.parlay.pickem_books
+        pcfg.parlay.pickem_books = ["underdog"]
         row = self.probe(pcfg, two_book_event())
         assert "prizepicks" in row.books_asked
         assert "prizepicks" in row.by_book
@@ -1330,3 +1333,155 @@ class TestCoverageByBook:
         ))
         assert row.two_sided_sharp_markets > 0
         assert not row.usable
+
+
+class TestBothPickemBooks:
+    """
+    Legs are matched to a product by book, so configuring both sites keeps
+    the two sets of tickets separate and priced on their own ladders. A
+    PrizePicks 3-pick pays 5x and an Underdog 3-pick pays 6x — blending
+    them would hide a 3.5-point difference in the hit rate each needs.
+    """
+
+    def both(self, pcfg, priors, table):
+        from fixtures import two_book_event
+
+        legs = []
+        for book in ("underdog", "prizepicks"):
+            legs += legs_from(
+                two_book_event(books_and_shifts=((book, 0.0),)),
+                pcfg, books=(book,),
+            )
+        products = [table.get("prizepicks_power"), table.get("underdog_standard")]
+        return P.build_tickets(legs, products, pcfg, priors, now=NOW)
+
+    def test_both_books_are_configured_by_default(self):
+        from betedge.config import Config
+
+        cfg = Config()
+        assert set(cfg.parlay.pickem_books) == {"prizepicks", "underdog"}
+        assert "prizepicks_power" in cfg.parlay.products
+        assert "underdog_standard" in cfg.parlay.products
+
+    def test_tickets_are_produced_for_each_book(self, pcfg, priors, table):
+        books = {t.product.book for t in self.both(pcfg, priors, table)}
+        assert books == {"underdog", "prizepicks"}
+
+    def test_no_ticket_mixes_legs_from_two_books(self, pcfg, priors, table):
+        # You cannot enter half a ticket at one site.
+        for ticket in self.both(pcfg, priors, table):
+            assert {leg.book for leg in ticket.legs} == {ticket.product.book}
+
+    def test_the_same_legs_price_differently_on_each_ladder(self, pcfg, priors, table):
+        legs = [make_leg(selection="A", market="m1", fair_prob=0.60),
+                make_leg(selection="B", market="m2", fair_prob=0.60),
+                make_leg(selection="C", market="m3", fair_prob=0.60)]
+        ud = P.evaluate_ticket(legs, table.get("underdog_standard"), pcfg, priors)
+        pp = P.evaluate_ticket(legs, table.get("prizepicks_power"), pcfg, priors)
+        # 6x against 5x on an identical three-leg set.
+        assert ud.payout_all_hit == 6.0
+        assert pp.payout_all_hit == 5.0
+        assert ud.ev > pp.ev
+
+    def test_a_leg_only_one_book_quotes_still_builds_there(self, pcfg, priors, table):
+        from fixtures import two_book_event
+
+        legs = legs_from(
+            two_book_event(books_and_shifts=(("prizepicks", 0.0),)),
+            pcfg, books=("prizepicks",),
+        )
+        tickets = P.build_tickets(
+            legs,
+            [table.get("prizepicks_power"), table.get("underdog_standard")],
+            pcfg, priors, now=NOW,
+        )
+        assert tickets
+        assert all(t.product.book == "prizepicks" for t in tickets)
+
+
+class TestSilentBooks:
+    def result_for(self, pcfg, payload, books):
+        from conftest import FakeClient
+
+        pcfg.parlay.pickem_books = list(books)
+        pcfg.parlay.products = ["prizepicks_power", "underdog_standard"]
+        client = FakeClient(
+            events_by_sport={"americanfootball_nfl": [
+                {"id": "kc1", "commence_time": (NOW + timedelta(hours=8)).isoformat()}
+            ]},
+            event_odds={("americanfootball_nfl", "kc1"): payload},
+        )
+        return P.scan_parlays(
+            pcfg, client, sports=["americanfootball_nfl"], now=NOW
+        )
+
+    def test_legs_are_counted_per_book(self, pcfg):
+        from fixtures import two_book_event
+
+        result = self.result_for(pcfg, two_book_event(
+            books_and_shifts=(("underdog", 0.0), ("prizepicks", 0.0))
+        ), ["underdog", "prizepicks"])
+        assert result.legs_by_book["underdog"] > 0
+        assert result.legs_by_book["prizepicks"] > 0
+
+    def test_a_book_that_quoted_nothing_is_named(self, pcfg):
+        # The distinction that matters: an empty board because there is no
+        # edge today, against an empty board because the feed does not
+        # carry that book at all. They look identical without this.
+        from fixtures import two_book_event
+
+        result = self.result_for(
+            pcfg,
+            two_book_event(books_and_shifts=(("underdog", 0.0),)),
+            ["underdog", "prizepicks"],
+        )
+        assert result.silent_books == ["prizepicks"]
+        assert result.legs_by_book.get("underdog", 0) > 0
+
+    def test_a_book_quoting_unusable_lines_also_counts_as_silent(self, pcfg):
+        # Quotes that never match a Pinnacle line produce no legs, which
+        # for the optimizer is the same outcome as no quotes at all.
+        from fixtures import two_book_event
+
+        result = self.result_for(pcfg, two_book_event(
+            books_and_shifts=(("underdog", 0.0), ("prizepicks", 1.0))
+        ), ["underdog", "prizepicks"])
+        assert "prizepicks" in result.silent_books
+
+    def test_nothing_is_silent_when_both_deliver(self, pcfg):
+        from fixtures import two_book_event
+
+        result = self.result_for(pcfg, two_book_event(
+            books_and_shifts=(("underdog", 0.0), ("prizepicks", 0.0))
+        ), ["underdog", "prizepicks"])
+        assert result.silent_books == []
+
+    def test_the_summary_says_so_and_points_at_coverage(self, pcfg):
+        from betedge import report as R
+        from fixtures import two_book_event
+
+        result = self.result_for(
+            pcfg,
+            two_book_event(books_and_shifts=(("underdog", 0.0),)),
+            ["underdog", "prizepicks"],
+        )
+        summary = R.parlay_summary(result)
+        assert "No legs at all from prizepicks" in summary
+        assert "parlay coverage" in summary
+        assert "Legs by book" in summary
+
+    def test_two_books_quoting_one_prop_are_two_legs(self, pcfg):
+        # Regression: leg identity left the book out, so the second book's
+        # copy of every shared prop was deduplicated away and that site
+        # produced no tickets for any prop the first one also posted.
+        from fixtures import two_book_event
+
+        legs = legs_from(
+            two_book_event(books_and_shifts=(("underdog", 0.0), ("prizepicks", 0.0))),
+            pcfg, books=("underdog", "prizepicks"),
+        )
+        by_book = {}
+        for leg in legs:
+            by_book[leg.book] = by_book.get(leg.book, 0) + 1
+        assert by_book["underdog"] == by_book["prizepicks"] > 0
+        assert len({leg.identity for leg in legs}) == len(legs)

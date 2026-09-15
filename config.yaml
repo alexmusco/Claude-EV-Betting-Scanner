@@ -252,12 +252,29 @@ prop_windows:
 # ---------------------------------------------------------------------------
 parlay:
   # Payout structures to build for. Names come from betedge/data/payouts.yaml.
+  # One per book you would actually enter at. Legs are matched to a product
+  # by book, so listing both keeps the two sets of tickets separate and
+  # priced on their own ladders -- a PrizePicks 3-pick pays 5x and an
+  # Underdog 3-pick pays 6x, which is a 3.5-point difference in the hit
+  # rate each needs, and blending them would hide that.
+  #
+  # Add the flex ladders too if you enter those; they are a genuinely
+  # different bet, not a variant:
+  #   - prizepicks_flex
+  #   - underdog_flex
   products:
+    - prizepicks_power
     - underdog_standard
 
   # Books whose legs are fixed-multiplier pick'em selections. The Odds API
   # carries Underdog; nothing here is scraped.
+  # Books whose legs are fixed-multiplier pick'em selections. Both are
+  # listed so whichever one The Odds API actually serves you produces
+  # tickets; a book it does not carry simply contributes no legs, and the
+  # scan says so by name rather than leaving you to wonder why a board
+  # came back empty.
   pickem_books:
+    - prizepicks
     - underdog
 
   # Monte Carlo. The seed is fixed so a re-run does not reshuffle the

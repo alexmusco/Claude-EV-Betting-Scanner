@@ -487,8 +487,16 @@ the payout structure assumes.
 
 ### Where the edge actually is
 
-**Fixed-multiplier pick'em is the primary target.** Underdog and
-PrizePicks set the payout by leg count and nothing else — a 2-pick pays
+**Fixed-multiplier pick'em is the primary target.** Both PrizePicks and
+Underdog are configured by default, and legs are matched to a product by
+book — so the two sets of tickets stay separate and are priced on their
+own ladders rather than blended. That matters: a PrizePicks 3-pick pays
+5x and an Underdog 3-pick pays 6x, which is a 3.5-point difference in the
+hit rate each one needs. A book your feed does not carry simply produces
+no legs, and the scan names it rather than leaving an empty board to be
+misread as "no edge today".
+
+Both set the payout by leg count and nothing else — a 2-pick pays
 3x, a 5-pick pays 20x — and that multiple does not adjust for which legs
 you chose. Two positively correlated legs hit together more often than a
 3x multiple implies. The gap between the real joint probability and the
@@ -791,7 +799,7 @@ betedge/
   data/
     payouts.yaml             pick'em payout ladders — YOU must verify these
     correlation_priors.yaml  structural correlation priors, with reasoning
-tests/          656 tests; no network, no credits spent
+tests/          685 tests; no network, no credits spent
                 (enforced: requests is blocked for the whole suite)
 ```
 

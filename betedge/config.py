@@ -195,7 +195,13 @@ class ParlayConfig:
 
     # Which payout structures to build tickets for. Names come from
     # betedge/data/payouts.yaml; see `betedge parlay verify-payouts`.
-    products: list[str] = field(default_factory=lambda: ["underdog_standard"])
+    #: Payout structures to build tickets for. One per book you would
+    #: actually enter at -- legs are matched to a product by book, so
+    #: listing both keeps the two sets of tickets separate and priced on
+    #: their own ladders rather than blended.
+    products: list[str] = field(
+        default_factory=lambda: ["prizepicks_power", "underdog_standard"]
+    )
     # Override the shipped data files. None uses what ships with betedge.
     payouts_path: str | None = None
     priors_path: str | None = None
@@ -270,7 +276,9 @@ class ParlayConfig:
     max_interpolation_distance: float = 1.0
 
     # Books whose legs are fixed-multiplier pick'em selections.
-    pickem_books: list[str] = field(default_factory=lambda: ["underdog"])
+    pickem_books: list[str] = field(
+        default_factory=lambda: ["prizepicks", "underdog"]
+    )
     # Push probability to assume on an integer line when Pinnacle does not
     # price both surrounding half-lines. Flagged wherever it is used.
     assumed_push_prob: float = 0.05
