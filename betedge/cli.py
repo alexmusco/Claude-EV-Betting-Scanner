@@ -27,7 +27,7 @@ from . import budget as B
 from . import report as R
 from .closing import capture_closing_lines
 from .config import Config
-from .db import Database
+from .db import Database, parse_timestamp
 from .markets import SPORTS, expand_sport_keys, markets_for
 from .oddsapi import OddsApiClient
 from .scan import _events_in_window, best_per_selection, cap_exposure, scan
@@ -377,28 +377,84 @@ def cmd_daily(cfg: Config, args) -> int:
 
 
 def cmd_show(cfg: Config, args) -> int:
+    """
+    Re-print a scan, showing only what is still actionable.
+
+    With an hourly cron the last scan can be nearly an hour old, and a
+    chunk of what it flagged will have started or drifted. Printing all of
+    it without saying so invites betting a price that no longer exists, so
+    started events are dropped by default and the scan's age is stated up
+    front.
+    """
     db = Database(cfg.database)
     scan_id = args.scan_id or db.latest_scan_id()
     if scan_id is None:
-        print("No scans recorded yet.")
+        print("No scans recorded yet. Run:  betedge daily")
         return 1
+
     rows = db.opportunities_for_scan(scan_id)
     if not rows:
         print(f"Scan #{scan_id} flagged nothing.")
         return 0
-    print(f"Scan #{scan_id}\n")
-    header = f"{'id':>5}  {'EV':>7}  {'bet':<44} {'book':<12} {'price':>7} {'stake':>7}  game"
-    print(header)
-    print("-" * len(header))
+
+    now = datetime.now(timezone.utc)
+    scanned_at = parse_timestamp(rows[0]["scanned_at"])
+    age_min = (now - scanned_at).total_seconds() / 60 if scanned_at else None
+
+    age_note = ""
+    if age_min is not None:
+        age_note = (f"{age_min:.0f} min ago" if age_min < 90
+                    else f"{age_min/60:.1f} hours ago")
+        if age_min > cfg.model.max_soft_staleness_minutes:
+            age_note += " -- prices have probably moved"
+
+    live, started = [], 0
     for r in rows:
         if r["suspect"] and not args.include_suspect:
             continue
+        start = parse_timestamp(r["commence_time"])
+        mins_out = (start - now).total_seconds() / 60 if start else None
+        if mins_out is not None and mins_out < cfg.model.min_minutes_to_start \
+                and not args.all:
+            started += 1
+            continue
+        live.append((r, mins_out))
+
+    print(f"Scan #{scan_id}" + (f"  ({age_note})" if age_note else "") + "\n")
+
+    if not live:
+        print("Nothing from this scan is still playable.")
+        if started:
+            print(f"  {started} flagged bet(s) have already started. "
+                  "Run `betedge daily` for a fresh look.")
+        db.close()
+        return 0
+
+    header = (f"{'id':>5}  {'EV':>7}  {'liq':<6} {'bet':<40} {'book':<12} "
+              f"{'price':>7} {'stake':>7}  {'starts':>7}  game")
+    print(header)
+    print("-" * len(header))
+    for r, mins_out in live:
         desc = R.describe(r["selection"], r["side"], r["line"])
+        if mins_out is None:
+            when = "-"
+        elif mins_out < 60:
+            when = f"{mins_out:.0f}m"
+        elif mins_out < 60 * 24:
+            when = f"{mins_out/60:.1f}h"
+        else:
+            when = f"{mins_out/1440:.1f}d"
+        liq = R._liquidity_label(r["liquidity"] if "liquidity" in r.keys() else None)
         print(
-            f"{r['id']:>5}  {r['ev']:>+6.1%}  {desc:<44.44} {r['soft_book']:<12} "
-            f"{r['soft_price']:>7.2f} {(r['recommended_stake'] or 0):>7,.0f}  "
+            f"{r['id']:>5}  {r['ev']:>+6.1%}  {liq:<6} {desc:<40.40} "
+            f"{r['soft_book']:<12} {r['soft_price']:>7.2f} "
+            f"{(r['recommended_stake'] or 0):>7,.0f}  {when:>7}  "
             f"{r['away_team']} @ {r['home_team']}"
         )
+
+    if started:
+        print(f"\n{started} more have already started (--all to include them).")
+    print("\nPlace one with:  betedge bet <id> --stake <amount>")
     db.close()
     return 0
 
@@ -599,6 +655,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("scan_id", nargs="?", type=int)
     s.add_argument("--ids", action="store_true", help="(ids are always shown)")
     s.add_argument("--include-suspect", action="store_true")
+    s.add_argument("--all", action="store_true",
+                   help="include bets whose event has already started")
     s.set_defaults(func=cmd_show)
 
     s = sub.add_parser("bet", help="log a bet you placed")

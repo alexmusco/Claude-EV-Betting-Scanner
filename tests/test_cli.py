@@ -1,6 +1,6 @@
 """The `daily` workflow end to end, with no network and no credits spent."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -259,3 +259,56 @@ class TestExclusionsSurviveOverrides:
         run(["--config", str(cfg_file), "quota"])
         out = capsys.readouterr().out
         assert "americanfootball_ncaaf" in out and "excluded" in out
+
+
+class TestShow:
+    def test_it_states_how_old_the_scan_is(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "show"])
+        out = capsys.readouterr().out
+        assert "Scan #1" in out and "ago" in out
+
+    def test_started_events_are_dropped_by_default(self, wired, capsys, tmp_path):
+        """With an hourly cron most of a scan can be stale by the time you
+        look; showing a bet whose game kicked off invites a bad click."""
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+
+        db = Database(tmp_path / "t.db")
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        db.conn.execute("UPDATE opportunities SET commence_time=?", (past,))
+        db.conn.commit()
+        db.close()
+
+        run(["--config", str(cfg_path), "show"])
+        out = capsys.readouterr().out
+        assert "Nothing from this scan is still playable" in out
+        assert "already started" in out
+
+    def test_all_flag_shows_them_anyway(self, wired, capsys, tmp_path):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        db = Database(tmp_path / "t.db")
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        db.conn.execute("UPDATE opportunities SET commence_time=?", (past,))
+        db.conn.commit()
+        db.close()
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "show", "--all"])
+        assert "Kansas City Chiefs" in capsys.readouterr().out
+
+    def test_it_shows_the_liquidity_column(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        run(["--config", str(cfg_path), "daily", "--no-close"])
+        capsys.readouterr()
+        run(["--config", str(cfg_path), "show"])
+        out = capsys.readouterr().out
+        assert "liq" in out and "deep" in out
+
+    def test_no_scans_yet_points_at_the_right_command(self, wired, capsys):
+        cfg_path, _client, _ = wired
+        assert run(["--config", str(cfg_path), "show"]) == 1
+        assert "betedge daily" in capsys.readouterr().out

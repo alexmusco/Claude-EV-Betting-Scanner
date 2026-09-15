@@ -171,3 +171,43 @@ class TestClosingLines:
             sharp_price_other=1.80, fair_prob_close=0.48, price_taken=1.90,
         )
         assert db.conn.execute("SELECT clv_ev FROM closing_lines").fetchone()[0] < 0
+
+
+class TestOrdering:
+    def test_a_scan_is_re_read_in_the_order_it_was_ranked(self, db):
+        """`betedge show` must not contradict the shortlist `daily` printed."""
+        db.conn.execute(
+            "INSERT INTO scans (started_at, finished_at, sports) VALUES ('a','b','s')"
+        )
+        for ev, edge, sel in [(0.08, 0.024, "thin"), (0.03, 0.030, "deep")]:
+            db.conn.execute(
+                "INSERT INTO opportunities (scan_id, scanned_at, sport, event_id,"
+                " commence_time, market, selection, side, sharp_book,"
+                " sharp_price_taken_side, sharp_price_other_side, sharp_overround,"
+                " fair_prob, fair_price, devig_method, devig_spread, soft_book,"
+                " soft_price, ev, edge_score, suspect)"
+                " VALUES (1,'t','s','e','c','h2h',?,'X','pinnacle',1.9,1.9,0.02,"
+                "0.5,2.0,'worst_case',0.001,'draftkings',2.1,?,?,0)",
+                (sel, ev, edge),
+            )
+        db.conn.commit()
+        rows = db.opportunities_for_scan(1)
+        assert [r["selection"] for r in rows] == ["deep", "thin"]
+
+    def test_rows_without_an_edge_score_fall_back_to_ev(self, db):
+        db.conn.execute(
+            "INSERT INTO scans (started_at, finished_at, sports) VALUES ('a','b','s')"
+        )
+        for ev, sel in [(0.02, "small"), (0.09, "big")]:
+            db.conn.execute(
+                "INSERT INTO opportunities (scan_id, scanned_at, sport, event_id,"
+                " commence_time, market, selection, side, sharp_book,"
+                " sharp_price_taken_side, sharp_price_other_side, sharp_overround,"
+                " fair_prob, fair_price, devig_method, devig_spread, soft_book,"
+                " soft_price, ev, suspect)"
+                " VALUES (1,'t','s','e','c','h2h',?,'X','pinnacle',1.9,1.9,0.02,"
+                "0.5,2.0,'worst_case',0.001,'draftkings',2.1,?,0)",
+                (sel, ev),
+            )
+        db.conn.commit()
+        assert [r["selection"] for r in db.opportunities_for_scan(1)] == ["big", "small"]

@@ -479,8 +479,18 @@ class Database:
         return row["id"] if row else None
 
     def opportunities_for_scan(self, scan_id: int) -> list[sqlite3.Row]:
+        """
+        One scan's opportunities, ranked the same way the scan itself ranked
+        them -- by liquidity-discounted edge, not raw EV. Ordering by ev here
+        put the thin markets back on top and quietly contradicted the
+        shortlist `betedge daily` had already printed.
+
+        COALESCE covers rows written before edge_score existed.
+        """
         return self.conn.execute(
-            "SELECT * FROM opportunities WHERE scan_id=? ORDER BY ev DESC", (scan_id,)
+            "SELECT * FROM opportunities WHERE scan_id=? "
+            "ORDER BY COALESCE(edge_score, ev) DESC",
+            (scan_id,),
         ).fetchall()
 
     def open_bets(self) -> list[sqlite3.Row]:
