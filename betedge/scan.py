@@ -150,6 +150,39 @@ class Opportunity:
         return d
 
 
+@dataclass(frozen=True)
+class QuoteAssessment:
+    """
+    One soft quote that got far enough to be priced, kept whatever the
+    verdict.
+
+    A scan that flags nothing reports only rejection counts, which say what
+    tripped but not by how much. The difference between a board whose best
+    quote sat at -0.3% and one whose best sat at -6% is the difference
+    between a bar set slightly too high and a market there is simply no
+    edge in, and the counters cannot tell them apart.
+    """
+
+    sport: str
+    matchup: str
+    market: str
+    tier: str
+    description: str
+    book: str
+    soft_price: float
+    sharp_price: float
+    overround: float
+    liquidity: float
+    ev: float
+    required_ev: float
+    minutes_to_start: float
+
+    @property
+    def shortfall(self) -> float:
+        """How far under its bar this quote fell. Negative means it cleared."""
+        return self.required_ev - self.ev
+
+
 @dataclass
 class ScanResult:
     started_at: datetime
@@ -163,6 +196,8 @@ class ScanResult:
     credits_remaining: int | None = None
     rejections: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    #: Every priced quote, when the scan was asked to collect them.
+    assessments: list = field(default_factory=list)
 
     @property
     def clean(self) -> list[Opportunity]:
@@ -342,8 +377,15 @@ def evaluate_event(
     cfg: Config,
     now: datetime | None = None,
     rejections: dict[str, int] | None = None,
+    collector: list | None = None,
 ) -> list[Opportunity]:
-    """Score every soft quote in one event against the sharp book."""
+    """
+    Score every soft quote in one event against the sharp book.
+
+    Pass `collector` to keep a QuoteAssessment for every quote that got as
+    far as being priced, rejected or not. That is what `betedge diagnose`
+    reads.
+    """
     now = now or datetime.now(timezone.utc)
     rejections = rejections if rejections is not None else {}
     m = cfg.model
@@ -429,6 +471,26 @@ def evaluate_event(
             minutes_to_start=minutes_out,
         )
         bar = liquidity.required_ev(m.min_ev, liq.score, m.liquidity_ev_penalty)
+
+        if collector is not None:
+            collector.append(
+                QuoteAssessment(
+                    sport=meta.get("sport") or "",
+                    matchup=f"{meta.get('away_team')} @ {meta.get('home_team')}",
+                    market=q.market,
+                    tier=liq.tier,
+                    description=describe_side(q) if q.selection == q.side
+                    else f"{q.selection} {describe_side(q)}",
+                    book=q.book,
+                    soft_price=q.price,
+                    sharp_price=sharp_same,
+                    overround=over_round,
+                    liquidity=liq.score,
+                    ev=ev,
+                    required_ev=bar,
+                    minutes_to_start=minutes_out,
+                )
+            )
 
         if m.min_liquidity > 0 and liq.score < m.min_liquidity:
             reject("market_too_thin")
@@ -547,6 +609,7 @@ class _ScanState:
     quotes_seen: int = 0
     paired: int = 0
     budget_exhausted: bool = False
+    collector: list | None = None
 
 
 def scan(
@@ -556,6 +619,7 @@ def scan(
     now: datetime | None = None,
     max_events_per_sport: int | None = None,
     core_sports: Sequence[str] | None = None,
+    collect: bool = False,
 ) -> ScanResult:
     """
     Run a scan: game-level markets first, then player props.
@@ -580,6 +644,7 @@ def scan(
     sports = list(sports if sports is not None else cfg.sports)
     core_sports = list(core_sports if core_sports is not None else cfg.core_sports)
     state = _ScanState()
+    state.collector = [] if collect else None
     books = cfg.books.all
 
     scanned_core = _scan_core_markets(cfg, client, core_sports, books, now, state)
@@ -603,6 +668,7 @@ def scan(
         credits_remaining=client.quota.remaining,
         rejections=state.rejections,
         errors=state.errors,
+        assessments=state.collector or [],
     )
 
 
@@ -663,7 +729,9 @@ def _scan_core_markets(
             state.quotes_seen += len(quotes)
             state.paired += len(group_sharp_markets(quotes, cfg.books.sharp))
             state.opportunities.extend(
-                evaluate_event(meta, quotes, cfg, now=now, rejections=state.rejections)
+                evaluate_event(meta, quotes, cfg, now=now,
+                               rejections=state.rejections,
+                               collector=state.collector)
             )
     return swept
 
@@ -736,7 +804,9 @@ def _scan_props(
             state.quotes_seen += len(quotes)
             state.paired += len(pair_sharp_quotes(quotes, cfg.books.sharp))
             state.opportunities.extend(
-                evaluate_event(meta, quotes, cfg, now=now, rejections=state.rejections)
+                evaluate_event(meta, quotes, cfg, now=now,
+                               rejections=state.rejections,
+                               collector=state.collector)
             )
 
 
