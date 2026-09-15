@@ -211,3 +211,24 @@ class TestQuota:
         cfg_path, client, _ = wired
         run(["--config", str(cfg_path), "quota"])
         assert client.quota.spent_this_session == 0
+
+
+class TestTrackerExport:
+    def test_a_missing_template_says_what_to_do(self, wired, tmp_path, capsys):
+        cfg_path, _client, _ = wired
+        db = Database(tmp_path / "t.db")
+        db.place_bet(stake=50, price=2.1, book="draftkings", selection="X", side="Over")
+        db.close()
+        assert run(["--config", str(cfg_path), "export",
+                    str(tmp_path / "out.xlsx")]) == 1
+        err = capsys.readouterr().err
+        assert "--template" in err and ".csv" in err
+
+    def test_csv_export_needs_no_template(self, wired, tmp_path):
+        cfg_path, _client, _ = wired
+        db = Database(tmp_path / "t.db")
+        db.place_bet(stake=50, price=2.1, book="draftkings", selection="X", side="Over")
+        db.close()
+        out = tmp_path / "bets.csv"
+        assert run(["--config", str(cfg_path), "export", str(out)]) == 0
+        assert out.exists()

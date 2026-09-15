@@ -108,7 +108,14 @@ def export_tracker(
     openpyxl = _require_openpyxl()
     template = Path(template_path or TEMPLATE)
     if not template.exists():
-        raise TrackerExportError(f"tracker template missing at {template}")
+        raise TrackerExportError(
+            f"No tracker template at {template}.\n"
+            "  This export fills a copy of YOUR workbook, so it needs the "
+            "workbook to copy from.\n"
+            "  Either put a blank copy at that path, or point at one:\n"
+            "    betedge export out.xlsx --template ~/Desktop/blank_tracker.xlsx\n"
+            "  Exporting to a path ending .csv needs no template."
+        )
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -504,7 +504,7 @@ def cmd_export(cfg: Config, args) -> int:
     if path.suffix.lower() in (".xlsx", ".xlsm"):
         from .tracker import export_tracker
 
-        summary = export_tracker(rows, path)
+        summary = export_tracker(rows, path, template_path=args.template)
         print(f"Wrote {summary['written']} settled bets to {summary['path']}")
         print(
             f"  staked {summary['total_staked']:,.0f}, "
@@ -638,6 +638,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="dump bets to CSV, or to your Excel tracker if the path ends .xlsx",
     )
     s.add_argument("path")
+    s.add_argument("--template", metavar="XLSX",
+                   help="workbook to copy for an .xlsx export; defaults to "
+                        "betedge/templates/tracker_template.xlsx")
     s.set_defaults(func=cmd_export)
 
     return p

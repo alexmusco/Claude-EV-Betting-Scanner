@@ -385,6 +385,11 @@ Configured in `markets.py`; run `bet sports` for the live list.
 bet export ~/Desktop/AlexBetTracker.xlsx
 ```
 
+**One-time setup:** this fills a copy of *your* workbook, so it needs the
+workbook to copy from. Put a blank copy at
+`betedge/templates/tracker_template.xlsx`, or pass `--template
+~/Desktop/blank_tracker.xlsx` per run. CSV export needs no template.
+
 Any path ending `.xlsx` fills your existing tracker from the database
 instead of writing a CSV. It writes only the input columns — date, sport,
 bet type, wager, odds, win, pick, specifics, strategy — and leaves every
