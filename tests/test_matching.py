@@ -141,14 +141,53 @@ class TestMatching:
 
     def test_two_events_naming_the_same_pair_are_ambiguous(self):
         # A doubleheader, or a duplicated feed entry. Picking one is a
-        # coin flip dressed up as a decision.
+        # coin flip dressed up as a decision. Both are placed inside the
+        # window so that the ambiguity is what is being tested.
         a = event("Los Angeles Dodgers", "San Diego Padres", eid="game1")
         b = event("Los Angeles Dodgers", "San Diego Padres",
-                  start=NOW + timedelta(hours=4), eid="game2")
+                  start=NOW - timedelta(hours=2), eid="game2")
         result = M.match_event("Dodgers vs Padres", [a, b], close_time=NOW)
         assert not result.confident
         assert "ambiguous" in result.reason
         assert result.candidates == 2
+
+    def test_a_market_closing_after_kickoff_is_the_same_game(self):
+        """
+        The two sides are not measuring the same moment. An odds feed
+        gives KICKOFF; an exchange gives when its market CLOSES, which is
+        at or after the final whistle. A symmetric window centred on
+        kickoff treats a perfectly ordinary NFL market -- an 8pm game
+        whose contract closes near midnight -- as a different fixture,
+        which is exactly what rejected a whole Week 3 slate.
+        """
+        for hours in (1, 3, 6, 10, 13):
+            result = M.match_event(
+                "Chiefs vs Broncos", [CHIEFS],
+                close_time=NOW + timedelta(hours=hours),
+            )
+            assert result.confident, hours
+
+    def test_a_market_closing_well_before_kickoff_is_not(self):
+        # Backwards stays tight: a market that closes before the game
+        # starts is a puzzle, not a tolerance.
+        result = M.match_event("Chiefs vs Broncos", [CHIEFS],
+                               close_time=NOW - timedelta(hours=6))
+        assert not result.confident
+
+    def test_the_next_meeting_is_still_out_of_reach(self):
+        # The window has to stay far short of the same two teams playing
+        # again, which is the whole reason it exists.
+        result = M.match_event("Chiefs vs Broncos", [CHIEFS],
+                               close_time=NOW + timedelta(days=7))
+        assert not result.confident
+        assert "different meeting" in result.reason
+
+    def test_an_explicit_tolerance_is_still_symmetric(self):
+        # A caller that passes its own number means that number.
+        assert M.match_event(
+            "Chiefs vs Broncos", [CHIEFS],
+            close_time=NOW - timedelta(hours=6), tolerance_hours=12,
+        ).confident
 
     def test_without_a_close_time_a_single_match_still_works(self):
         result = M.match_event("Chiefs vs Broncos", [CHIEFS])

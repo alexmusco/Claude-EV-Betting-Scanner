@@ -62,9 +62,20 @@ SHARED_CITIES = (
 #: match a single event.
 WITHIN_LEAGUE_COLLISIONS = ("sox",)
 
-#: How far apart two start times may be and still be the same game. Wide
-#: enough for a timezone slip or a listed-time difference, narrow enough
-#: that a rematch a week later cannot collide.
+#: How far apart two times may be and still be the same game.
+#:
+#: ASYMMETRIC, because the two sides are not measuring the same moment.
+#: An odds feed gives KICKOFF; an exchange gives when its market CLOSES,
+#: which is at or after the final whistle. So a Kalshi market on an 8pm
+#: game legitimately carries a time several hours later, and a symmetric
+#: window centred on kickoff treats that as a different fixture.
+#:
+#: Backwards stays tight: a market closing BEFORE kickoff is a puzzle,
+#: not a tolerance. Forwards allows a long game plus a settlement delay,
+#: while staying far short of the same two teams meeting again.
+TOLERANCE_BEFORE_HOURS = 3.0
+TOLERANCE_AFTER_HOURS = 14.0
+#: Kept for callers that want one symmetric number.
 DEFAULT_TIME_TOLERANCE_HOURS = 8.0
 
 
@@ -162,6 +173,20 @@ class MatchResult:
         return (self.event or {}).get("id")
 
 
+def _within_window(hours_apart: float, tolerance_hours: float | None) -> bool:
+    """
+    Whether a market's time is consistent with this game's kickoff.
+
+    `hours_apart` is market time minus kickoff, so positive means the
+    market's stamp is LATER -- which is the normal case for an exchange
+    quoting a close.
+    """
+    if tolerance_hours is not None \
+            and tolerance_hours != DEFAULT_TIME_TOLERANCE_HOURS:
+        return abs(hours_apart) <= tolerance_hours
+    return -TOLERANCE_BEFORE_HOURS <= hours_apart <= TOLERANCE_AFTER_HOURS
+
+
 def _start_of(event) -> datetime | None:
     from .db import parse_timestamp
 
@@ -208,13 +233,13 @@ def match_event(
     if close_time is not None:
         timed = [c for c in candidates
                  if c.hours_apart is None
-                 or abs(c.hours_apart) <= tolerance_hours]
+                 or _within_window(c.hours_apart, tolerance_hours)]
         if not timed:
             nearest = min(candidates, key=lambda c: abs(c.hours_apart or 0))
             return MatchResult(
                 nearest.event, False,
-                f"both teams match but the nearest start is "
-                f"{abs(nearest.hours_apart):.0f}h away -- probably a "
+                f"both teams match but the times are "
+                f"{nearest.hours_apart:+.0f}h apart -- probably a "
                 "different meeting of the same two teams",
                 candidates=len(candidates),
             )

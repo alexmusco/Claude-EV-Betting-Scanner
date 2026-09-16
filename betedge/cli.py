@@ -1046,6 +1046,17 @@ def _print_kalshi(result, cfg, args) -> None:
     print(f"\n{len(result.games)} game(s) priced, "
           f"{len(result.quotes)} rung(s) quoted, "
           f"{len(result.unmatched)} market(s) unmatched.")
+
+    if result.unmatched:
+        # ALWAYS, not behind a flag. "32 unmatched" with no reason is
+        # not a diagnosis, it is a shrug -- and it was printed twice
+        # before anyone could act on it.
+        from collections import Counter
+
+        reasons = Counter(match.reason for _m, match in result.unmatched)
+        print("\nWhy they did not join:")
+        for reason, count in reasons.most_common(6):
+            print(f"  {count:>4}  {reason}")
     if result.series:
         # Where the games actually live, so a narrowed re-run is a
         # command rather than a guess.
