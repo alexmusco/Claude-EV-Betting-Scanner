@@ -395,6 +395,32 @@ def cmd_daily(cfg: Config, args) -> int:
 
     print(f"\nScan #{scan_id}. Re-print it any time with:  betedge show")
 
+    # Push to the phone AFTER the scan is stored and printed. The scan has
+    # already cost credits by this point, so nothing below is permitted to
+    # lose it -- a dead phone or a wrong token reports and moves on.
+    if cfg.notify.enabled and not getattr(args, "no_notify", False):
+        stats = notify_opportunities(
+            cfg, db, db.opportunities_for_scan(scan_id),
+            spent=client.quota.spent_this_session,
+            dry_run=getattr(args, "dry_run_notify", False),
+        )
+        if stats["quiet"]:
+            print("Quiet hours: nothing sent. The next waking run will "
+                  "pick these up.")
+        elif stats["sent"]:
+            print(f"Notified: {stats['sent']} message(s)"
+                  + (f", {stats['suppressed']} already sent"
+                     if stats["suppressed"] else "")
+                  + ".")
+        elif stats["suppressed"]:
+            print(f"Nothing new to notify ({stats['suppressed']} already "
+                  "sent).")
+        if stats["errors"]:
+            print(f"{stats['errors']} notification(s) FAILED: "
+                  + "; ".join(stats["reasons"][:2]))
+            print("They are not marked as sent, so the next run will try "
+                  "again.")
+
     if not args.no_report:
         stamp = datetime.now().strftime("%Y%m%d_%H%M")
         path = R.write_report(
@@ -719,6 +745,189 @@ def cmd_report(cfg: Config, args) -> int:
         Path(cfg.reports_dir) / "performance.html", R.performance_report_html(db, cfg)
     )
     print(f"\nReport: {path}")
+    db.close()
+    return 0
+
+
+# ---------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------
+
+
+def notify_opportunities(cfg: Config, db, rows, now=None, spent=None,
+                         session=None, dry_run=False) -> dict:
+    """
+    Push the bets worth placing to a phone, and say what was suppressed.
+
+    Called after a scan rather than instead of one: the scan has already
+    cost credits by the time this runs, so nothing here is allowed to
+    raise past the caller.
+    """
+    from . import notify as N
+    from . import report as R
+
+    nc = cfg.notify
+    now = now or datetime.now(timezone.utc)
+    stats = {"sent": 0, "suppressed": 0, "below_bar": 0, "too_soon": 0,
+             "quiet": False, "errors": 0, "reasons": []}
+
+    if not nc.enabled:
+        return stats
+
+    local_now = now.astimezone()
+    if N.in_quiet_hours(local_now, nc.quiet_start, nc.quiet_end):
+        # Not an error and not a silent drop: the run says so, and the
+        # bets stay unsent so the next waking run can pick them up.
+        stats["quiet"] = True
+        return stats
+
+    candidates = []
+    for row in rows:
+        keys = row.keys()
+        # Never push a bet the tool itself refuses to stake. A suspect
+        # row is shown in the terminal because an implausible edge is
+        # interesting to look at; on a phone, stripped of its flags and
+        # its context, it reads exactly like a recommendation.
+        if "suspect" in keys and row["suspect"]:
+            stats["below_bar"] += 1
+            continue
+        if "recommended_stake" in keys and not row["recommended_stake"]:
+            stats["below_bar"] += 1
+            continue
+        ev = row["ev"] if "ev" in keys else None
+        if ev is None or ev < nc.min_ev:
+            stats["below_bar"] += 1
+            continue
+        minutes = _minutes_to_start(row, now)
+        if minutes is not None and minutes < nc.min_minutes_to_start:
+            # No point buzzing about something you cannot reach in time.
+            stats["too_soon"] += 1
+            continue
+        fp = N.opportunity_fingerprint(row)
+        price = row["soft_price"] if "soft_price" in row.keys() else None
+        wanted, why = db.should_notify(
+            fp, price, now,
+            resend_after_hours=nc.resend_after_hours,
+            resend_on_price_gain=nc.resend_on_price_gain,
+        )
+        if not wanted:
+            stats["suppressed"] += 1
+            continue
+        candidates.append((row, fp, price, ev, why))
+
+    if not candidates:
+        return stats
+
+    candidates.sort(key=lambda c: c[3], reverse=True)
+    messages = []
+    if len(candidates) > nc.max_messages:
+        # A phone that vibrates nine times gets silenced, and then the
+        # tenth one -- the one that mattered -- is not seen either.
+        best = candidates[0][3]
+        messages.append((N.format_digest(len(candidates), best, spent), None))
+        for row, fp, price, ev, _why in candidates:
+            messages.append((None, (row, fp, price, ev)))
+    else:
+        for row, fp, price, ev, _why in candidates:
+            stake = (row["recommended_stake"]
+                     if "recommended_stake" in row.keys() else None)
+            messages.append((
+                N.format_opportunity(row, stake=stake, american=R.american),
+                (row, fp, price, ev),
+            ))
+
+    for message, payload in messages:
+        if message is None:
+            # Digest mode: record that these were covered, without
+            # sending one message each.
+            row, fp, price, ev = payload
+            if not dry_run:
+                db.record_notification(
+                    fp, now, provider="digest", ev=ev, price=price,
+                    opportunity_id=row["id"] if "id" in row.keys() else None,
+                    title="(in digest)",
+                )
+            continue
+        if dry_run:
+            print(f"  [dry run] {message.title}")
+            stats["sent"] += 1
+            continue
+        try:
+            provider = N.send(message, nc, session=session)
+        except Exception as exc:  # noqa: BLE001
+            # Recorded as a failure, which deliberately does NOT count as
+            # sent: a broken phone must not suppress the bet next run.
+            stats["errors"] += 1
+            stats["reasons"].append(str(exc))
+            if payload:
+                row, fp, price, ev = payload
+                db.record_notification(
+                    fp, now, ev=ev, price=price, title=message.title,
+                    ok=False, error=str(exc)[:500],
+                )
+            continue
+        stats["sent"] += 1
+        if payload:
+            row, fp, price, ev = payload
+            db.record_notification(
+                fp, now, provider=provider, ev=ev, price=price,
+                opportunity_id=row["id"] if "id" in row.keys() else None,
+                title=message.title,
+            )
+    return stats
+
+
+def _minutes_to_start(row, now):
+    from .db import parse_timestamp
+
+    try:
+        commence = row["commence_time"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    start = parse_timestamp(commence)
+    if start is None:
+        return None
+    return (start - now).total_seconds() / 60.0
+
+
+def cmd_notify_test(cfg: Config, args) -> int:
+    """Send one message, to prove the phone end of the chain works."""
+    from . import notify as N
+
+    if not cfg.notify.enabled and not args.force:
+        print("Notifications are disabled. Set notify.enabled: true in your "
+              "config, or pass --force to test anyway.")
+        return 1
+    message = N.Message(
+        title="betedge test",
+        body="If you can read this, the notification chain works.",
+        tags=["white_check_mark"],
+    )
+    try:
+        provider = N.send(message, cfg.notify)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not send: {exc}")
+        return 1
+    print(f"Sent via {provider}.")
+    return 0
+
+
+def cmd_notify_log(cfg: Config, args) -> int:
+    """What has already been pushed, and what failed."""
+    db = Database(cfg.database)
+    rows = db.recent_notifications(args.limit)
+    if not rows:
+        print("Nothing sent yet.")
+        db.close()
+        return 0
+    print(f"{'when':<26} {'ok':<4} {'ev':>7} {'provider':<10} title")
+    for row in rows:
+        ev = f"{row['ev']:+.1%}" if row["ev"] is not None else "-"
+        mark = "yes" if row["ok"] else "NO"
+        print(f"{row['sent_at'][:25]:<26} {mark:<4} {ev:>7} "
+              f"{(row['provider'] or '-'):<10} {row['title'] or ''}")
+        if row["error"]:
+            print(f"{'':<26}   ! {row['error'][:90]}")
     db.close()
     return 0
 
@@ -1591,6 +1800,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-close", action="store_true",
                    help="skip closing-line capture")
     s.add_argument("--hide-suspect", action="store_true")
+    s.add_argument("--no-notify", action="store_true",
+                   help="skip phone notifications for this run")
+    s.add_argument("--dry-run-notify", action="store_true",
+                   help="print what would be pushed without sending it")
     s.add_argument("--no-report", action="store_true")
     s.set_defaults(func=cmd_daily)
 
@@ -1824,6 +2037,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--void", type=int, default=0, metavar="N",
                    help="legs that pushed and shrank the entry")
     s.set_defaults(func=cmd_parlay_settle)
+
+    p_notify = sub.add_parser(
+        "notify", help="phone notifications for bets worth placing"
+    )
+    nsub = p_notify.add_subparsers(dest="notify_command", required=True)
+
+    s = nsub.add_parser("test", help="send one message to prove it works")
+    s.add_argument("--force", action="store_true",
+                   help="send even if notifications are disabled")
+    s.set_defaults(func=cmd_notify_test)
+
+    s = nsub.add_parser("log", help="what has been pushed, and what failed")
+    s.add_argument("--limit", type=int, default=20)
+    s.set_defaults(func=cmd_notify_log)
 
     s = sub.add_parser(
         "compare",

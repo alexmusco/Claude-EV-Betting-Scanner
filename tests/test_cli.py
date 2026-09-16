@@ -667,3 +667,148 @@ class TestDeleteCommand:
         ).fetchone()["c"]
         assert left == 0
         db.close()
+
+
+class TestNotifyInDaily:
+    """
+    The scheduled-run path: scan, store, push. The scan has already cost
+    credits by the time notification happens, so nothing there may lose
+    it -- a dead phone reports and the run still succeeds.
+    """
+
+    def enable(self, tmp_path, **overrides):
+        import yaml
+
+        cfg_path = tmp_path / "config.yaml"
+        raw = yaml.safe_load(cfg_path.read_text())
+        raw["notify"] = {
+            "enabled": True, "provider": "ntfy", "ntfy_topic": "t",
+            "quiet_start": "", "quiet_end": "", "min_ev": 0.0,
+            "min_minutes_to_start": 0.0, **overrides,
+        }
+        cfg_path.write_text(yaml.safe_dump(raw))
+        return cfg_path
+
+    def test_a_dry_run_says_what_it_would_send(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.enable(tmp_path)
+        cli.main(["--config", str(cfg_path), "daily", "--dry-run-notify",
+                  "--no-report"])
+        assert "[dry run]" in capsys.readouterr().out
+
+    def test_no_notify_skips_it_entirely(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.enable(tmp_path)
+        cli.main(["--config", str(cfg_path), "daily", "--no-notify",
+                  "--no-report"])
+        out = capsys.readouterr().out
+        assert "[dry run]" not in out
+        assert "Notified" not in out
+
+    def test_quiet_hours_are_reported_not_silent(self, wired, capsys):
+        # A run that sends nothing because of the hour must say so, or it
+        # is indistinguishable from a broken notifier.
+        cfg_path, _client, tmp_path = wired
+        self.enable(tmp_path, quiet_start="00:00", quiet_end="23:59")
+        cli.main(["--config", str(cfg_path), "daily", "--no-report"])
+        assert "Quiet hours" in capsys.readouterr().out
+
+    def test_a_failing_phone_does_not_fail_the_scan(self, wired, capsys,
+                                                    monkeypatch):
+        cfg_path, _client, tmp_path = wired
+        self.enable(tmp_path)
+
+        def explode(*a, **kw):
+            raise RuntimeError("phone is off")
+
+        monkeypatch.setattr("betedge.notify.send", explode)
+        assert cli.main(["--config", str(cfg_path), "daily",
+                         "--no-report"]) == 0
+        out = capsys.readouterr().out
+        assert "Scan #" in out                 # the scan survived
+        assert "FAILED" in out and "phone is off" in out
+        assert "try again" in out
+
+    def test_no_bet_is_ever_pushed_twice(self, wired, capsys, monkeypatch):
+        """
+        Asserted against the ledger rather than a send count, because a
+        second scan may legitimately surface a bet the first did not.
+        The invariant is per-bet: one successful notification each.
+        """
+        from betedge.db import Database
+
+        cfg_path, _client, tmp_path = wired
+        self.enable(tmp_path)
+        monkeypatch.setattr("betedge.notify.send", lambda m, c, **kw: "ntfy")
+        cli.main(["--config", str(cfg_path), "daily", "--no-report"])
+        capsys.readouterr()
+        cli.main(["--config", str(cfg_path), "daily", "--no-report"])
+        assert "already sent" in capsys.readouterr().out
+
+        db = Database(tmp_path / "t.db")
+        rows = db.conn.execute(
+            "SELECT fingerprint, COUNT(*) n FROM notifications "
+            "WHERE ok=1 GROUP BY fingerprint HAVING n > 1"
+        ).fetchall()
+        db.close()
+        assert rows == [], "a bet was notified more than once"
+
+    def test_a_suspect_bet_is_never_pushed(self, wired, capsys, monkeypatch):
+        """
+        The terminal shows a +17% implausible edge because it is
+        interesting to look at, next to the flag saying why it is not
+        staked. A phone notification carries neither the flag nor the
+        context -- it reads exactly like a recommendation.
+        """
+        from betedge.db import Database
+
+        cfg_path, _client, tmp_path = wired
+        self.enable(tmp_path)
+        monkeypatch.setattr("betedge.notify.send", lambda m, c, **kw: "ntfy")
+        cli.main(["--config", str(cfg_path), "daily", "--no-report"])
+
+        db = Database(tmp_path / "t.db")
+        suspect_ids = {
+            r["id"] for r in db.conn.execute(
+                "SELECT id FROM opportunities WHERE suspect=1"
+            ).fetchall()
+        }
+        notified = {
+            r["opportunity_id"] for r in db.conn.execute(
+                "SELECT opportunity_id FROM notifications WHERE ok=1"
+            ).fetchall()
+        }
+        db.close()
+        assert suspect_ids, "fixture should produce at least one suspect row"
+        assert not (suspect_ids & notified)
+
+    def test_notifications_are_off_unless_asked_for(self, wired, capsys,
+                                                    monkeypatch):
+        cfg_path, _client, _tmp = wired
+        monkeypatch.setattr("betedge.notify.send",
+                            lambda *a, **kw: pytest.fail("should not send"))
+        cli.main(["--config", str(cfg_path), "daily", "--no-report"])
+
+
+class TestNotifyCommands:
+    def test_test_refuses_while_disabled_unless_forced(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        assert cli.main(["--config", str(cfg_path), "notify", "test"]) == 1
+        assert "disabled" in capsys.readouterr().out
+
+    def test_a_send_failure_is_reported_not_raised(self, wired, capsys,
+                                                   monkeypatch):
+        cfg_path, _client, _tmp = wired
+
+        def explode(*a, **kw):
+            raise RuntimeError("no topic")
+
+        monkeypatch.setattr("betedge.notify.send", explode)
+        assert cli.main(["--config", str(cfg_path), "notify", "test",
+                         "--force"]) == 1
+        assert "Could not send" in capsys.readouterr().out
+
+    def test_the_log_is_empty_before_anything_is_sent(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        cli.main(["--config", str(cfg_path), "notify", "log"])
+        assert "Nothing sent yet" in capsys.readouterr().out

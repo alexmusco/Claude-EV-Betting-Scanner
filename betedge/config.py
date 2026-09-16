@@ -307,6 +307,48 @@ class BudgetConfig:
 
 
 @dataclass
+class NotifyConfig:
+    """
+    Pushing a bet to a phone. See notify.py.
+
+    Credentials are read from the environment first and this file second,
+    because a config file gets committed by accident and an environment
+    variable does not.
+    """
+
+    enabled: bool = False
+    # ntfy | pushover | telegram. ntfy needs no account: the topic name
+    # is the whole secret, so make it long and random, and remember that
+    # anyone who learns it can read your alerts and send you their own.
+    provider: str = "ntfy"
+    ntfy_topic: str = ""            # or BETEDGE_NTFY_TOPIC
+    ntfy_server: str = "https://ntfy.sh"
+    pushover_token: str = ""        # or BETEDGE_PUSHOVER_TOKEN
+    pushover_user: str = ""         # or BETEDGE_PUSHOVER_USER
+    telegram_token: str = ""        # or BETEDGE_TELEGRAM_TOKEN
+    telegram_chat_id: str = ""      # or BETEDGE_TELEGRAM_CHAT_ID
+
+    # Only bets at least this good are worth a buzz. Deliberately higher
+    # than the scan's own bar: the terminal can afford to show you a
+    # marginal play, a phone cannot.
+    min_ev: float = 0.03
+    # At most this many individual bets per run; beyond it, one digest.
+    # A phone that vibrates nine times gets silenced.
+    max_messages: int = 4
+    # Do not re-send the same bet until this long has passed...
+    resend_after_hours: float = 12.0
+    # ...unless the price improved by at least this much, which makes it
+    # materially a different bet from the one already described.
+    resend_on_price_gain: float = 0.05
+    # Local clock, 24h. Wraps midnight, which is the normal case.
+    quiet_start: str = "23:00"
+    quiet_end: str = "08:00"
+    # A bet starting sooner than this is not worth sending: you will not
+    # get to your phone, open the app and place it in time.
+    min_minutes_to_start: float = 10.0
+
+
+@dataclass
 class KalshiConfig:
     """
     The Kalshi exchange. See kalshi.py.
@@ -348,6 +390,7 @@ class Config:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     parlay: ParlayConfig = field(default_factory=ParlayConfig)
     kalshi: KalshiConfig = field(default_factory=KalshiConfig)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
     # Sports scanned for PLAYER PROPS. Expensive: one call per event per
     # market off the per-event endpoint.
     sports: list[str] = field(
@@ -410,6 +453,7 @@ class Config:
             budget=BudgetConfig(**raw.get("budget", {})),
             parlay=ParlayConfig(**raw.get("parlay", {})),
             kalshi=KalshiConfig(**raw.get("kalshi", {})),
+            notify=NotifyConfig(**raw.get("notify", {})),
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
             excluded_sports=(

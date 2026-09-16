@@ -290,6 +290,25 @@ CREATE TABLE IF NOT EXISTS correlation_estimates (
     UNIQUE(sport, market_a, market_b, relation)
 );
 
+-- What has already been sent to a phone. The whole point of a scheduled
+-- scan is that each run is a fresh process with no recollection of the
+-- last, so "have I already said this?" has to be answered from disk.
+CREATE TABLE IF NOT EXISTS notifications (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint     TEXT NOT NULL,
+    sent_at         TEXT NOT NULL,
+    provider        TEXT,
+    ev              REAL,
+    price           REAL,
+    opportunity_id  INTEGER REFERENCES opportunities(id),
+    title           TEXT,
+    ok              INTEGER NOT NULL DEFAULT 1,
+    error           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_fp
+    ON notifications(fingerprint, sent_at);
+
 CREATE TABLE IF NOT EXISTS closing_lines (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     opportunity_id      INTEGER REFERENCES opportunities(id),
@@ -1015,6 +1034,85 @@ class Database:
 
     def get_bet(self, bet_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
+
+    def last_notification(self, fingerprint: str) -> sqlite3.Row | None:
+        """The most recent SUCCESSFUL send for this bet, if any."""
+        return self.conn.execute(
+            "SELECT * FROM notifications WHERE fingerprint=? AND ok=1 "
+            "ORDER BY sent_at DESC LIMIT 1",
+            (fingerprint,),
+        ).fetchone()
+
+    def should_notify(
+        self,
+        fingerprint: str,
+        price: float | None,
+        now: datetime,
+        resend_after_hours: float = 12.0,
+        resend_on_price_gain: float = 0.05,
+    ) -> tuple[bool, str]:
+        """
+        Whether this bet is worth buzzing about, and why.
+
+        Three ways to earn a notification: never sent, sent long enough
+        ago that it was plausibly missed, or the price has moved far
+        enough in your favour that it is materially a better bet than the
+        one already described. Anything else is the same bet again, and
+        repeating it is how a person learns to ignore the alert that
+        matters.
+        """
+        previous = self.last_notification(fingerprint)
+        if previous is None:
+            return True, "new"
+
+        sent_at = parse_timestamp(previous["sent_at"])
+        if sent_at is not None:
+            age = (now - sent_at).total_seconds() / 3600.0
+            if age >= resend_after_hours:
+                return True, f"last sent {age:.0f}h ago"
+
+        old_price = previous["price"]
+        if price and old_price and old_price > 0:
+            gain = (price - old_price) / old_price
+            if gain >= resend_on_price_gain:
+                return True, f"price improved {gain:+.1%}"
+        return False, "already sent"
+
+    def record_notification(
+        self,
+        fingerprint: str,
+        now: datetime,
+        provider: str | None = None,
+        ev: float | None = None,
+        price: float | None = None,
+        opportunity_id: int | None = None,
+        title: str | None = None,
+        ok: bool = True,
+        error: str | None = None,
+    ) -> int:
+        """
+        Log a send, successful or not.
+
+        Failures are recorded too, and deliberately do NOT count as
+        having been sent -- otherwise a broken phone would silently
+        suppress the bet on the next run, which is the worst possible
+        moment to go quiet.
+        """
+        with self.conn:
+            cursor = self.conn.execute(
+                "INSERT INTO notifications (fingerprint, sent_at, provider, "
+                "ev, price, opportunity_id, title, ok, error) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (fingerprint, now.isoformat(), provider, ev, price,
+                 opportunity_id, title, 1 if ok else 0, error),
+            )
+        return cursor.lastrowid
+
+    def recent_notifications(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM notifications ORDER BY sent_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
 
     def delete_bet(self, bet_id: int) -> sqlite3.Row | None:
         """

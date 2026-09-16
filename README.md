@@ -464,6 +464,116 @@ the t-stat.
 
 ---
 
+## Running it somewhere that never sleeps
+
+A scan is only useful if it runs when the edges appear, and edges appear
+while you are asleep, at work, or on a train. A laptop does none of that:
+the lid shuts and cron stops. So the scheduled runs belong on something
+always-on -- a $5 VPS or a Raspberry Pi -- with the results pushed to
+your phone.
+
+### The phone end first
+
+Prove notifications work before wiring up a schedule, because debugging a
+silent cron job is miserable:
+
+```yaml
+notify:
+  enabled: true
+  provider: ntfy
+  ntfy_topic: "pick-something-long-and-random-3f9a2c"
+```
+
+```bash
+bet notify test
+```
+
+**The ntfy topic is the entire secret.** Anyone who learns it can read
+your alerts and send you their own, so make it long and random and do not
+put anything in a message you would mind a stranger reading. Install the
+ntfy app, subscribe to that topic, and the test message arrives.
+
+Prefer credentials in the environment over the config file -- a config
+file gets committed by accident and an environment variable does not:
+
+```bash
+export BETEDGE_NTFY_TOPIC="..."
+```
+
+Pushover and Telegram work the same way; see `NotifyConfig`.
+
+### The schedule
+
+On a VPS or Pi, a systemd timer is better than cron: it logs, it survives
+reboots, and it will not silently stop.
+
+`/etc/systemd/system/betedge.service`
+
+```ini
+[Unit]
+Description=betedge daily scan
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=betedge
+WorkingDirectory=/home/betedge/betedge_project
+Environment="BETEDGE_NTFY_TOPIC=..."
+Environment="ODDS_API_KEY=..."
+ExecStart=/home/betedge/betedge_project/.venv/bin/python -m betedge daily
+```
+
+`/etc/systemd/system/betedge.timer`
+
+```ini
+[Unit]
+Description=Run betedge through the day
+
+[Timer]
+OnCalendar=*-*-* 09,12,15,18,21:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl enable --now betedge.timer
+systemctl list-timers betedge.timer      # when it next fires
+journalctl -u betedge.service -n 50      # what it did last time
+```
+
+`Persistent=true` matters: if the machine was off when a run was due, it
+runs once on boot rather than skipping the day.
+
+### What stops it becoming spam
+
+Five runs a day would find the same bet five times. Three rules prevent
+that, all of them in the database rather than in memory, because each run
+is a fresh process:
+
+- **The same bet is sent once.** Identity excludes price, so a line
+  ticking from -110 to -108 is not a new alert.
+- **Unless it materially improved.** A price gain past
+  `resend_on_price_gain` is a better bet than the one described, so it is
+  worth saying again. So is enough time passing that you may have missed
+  the first.
+- **Quiet hours**, wrapping midnight, which is the normal case. A run
+  during them says so rather than silently sending nothing, and leaves
+  the bets unsent for the next waking run.
+
+Two more rules worth knowing:
+
+- **A suspect bet is never pushed.** The terminal shows a +17% implausible
+  edge because it is interesting, right next to the flag saying why it is
+  not staked. A notification carries neither the flag nor the context, so
+  it would read exactly like a recommendation.
+- **A failed send does not count as sent.** Otherwise a flat phone
+  battery would suppress the bet on the next run too, which is the worst
+  possible moment to go quiet.
+
+`bet notify log` shows what went out and what failed.
+
 ## Which strategy is working
 
 The two strategies are tracked in separate tables and always have been —
@@ -985,6 +1095,8 @@ entry point is never created.
 | `bet delete <id> ...` | free | Remove bets from the ledger — a bet you never placed distorts every ratio in `bet compare` |
 | `bet close` | ~1/event | Capture closing lines |
 | `bet report` | free | Performance and CLV |
+| `bet notify test` | free | Send one message, to prove the phone end of the chain works |
+| `bet notify log` | free | What has been pushed, and what failed |
 | `bet export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |
 | `bet parlay verify-payouts` | free | Print the payout ladders. **Read this before trusting any ticket EV.** |
 | `bet parlay coverage` | ~1/event | Which sports have usable two-sided Pinnacle prop coverage |
