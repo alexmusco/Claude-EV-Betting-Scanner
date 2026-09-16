@@ -521,3 +521,148 @@ class Assessment:
             f"{self.contract.describe()} @ {self.price * 100:.0f}c  "
             f"fair {self.probability * 100:.1f}c  EV {self.ev:+.1%}"
         )
+
+
+def assess(
+    snapshot: Tomatometer,
+    contract: Contract,
+    price: float,
+    cfg,
+    now: datetime | None = None,
+    max_new_reviews: int | None = None,
+    expected_new: float | None = None,
+    maker: bool | None = None,
+) -> Assessment:
+    """
+    Price one contract and say everything that could be wrong about it.
+
+    `cfg` is a TomatoesConfig. The guards below withhold a stake rather
+    than hide a number: an assessment that cannot be trusted is still
+    printed, with the reason attached, because "no bets" with no
+    explanation is the output that makes a tool get ignored.
+    """
+    now = now or datetime.now(timezone.utc)
+    tc = cfg.tomatoes if hasattr(cfg, "tomatoes") else cfg
+    ceiling = (
+        max_new_reviews if max_new_reviews is not None
+        else tc.default_max_new_reviews
+    )
+    arrivals = (
+        expected_new if expected_new is not None
+        else tc.default_expected_new_reviews
+    )
+    is_maker = tc.assume_maker if maker is None else maker
+
+    b = bounds(snapshot, ceiling)
+    verdict = decided(snapshot, contract, ceiling)
+
+    common = dict(
+        expected_new=arrivals, max_new_reviews=ceiling,
+        prior_alpha=tc.prior_alpha, prior_beta=tc.prior_beta,
+    )
+    probability = probability_yes(snapshot, contract, drift=tc.drift, **common)
+    no_drift = (
+        probability if tc.drift == 0.0
+        else probability_yes(snapshot, contract, drift=0.0, **common)
+    )
+
+    a = Assessment(
+        contract=contract, snapshot=snapshot, price=price,
+        probability=probability, probability_no_drift=no_drift,
+        bounds=b, decided=verdict,
+        ev=ev_on_stake(probability, price, contracts=1, maker=is_maker),
+        ev_no_drift=ev_on_stake(no_drift, price, contracts=1, maker=is_maker),
+        maker=is_maker,
+    )
+    return apply_guards(a, cfg, now=now)
+
+
+def apply_guards(a: Assessment, cfg, now: datetime | None = None) -> Assessment:
+    """Flag what cannot be trusted, and withhold a stake where it matters."""
+    now = now or datetime.now(timezone.utc)
+    tc = cfg.tomatoes if hasattr(cfg, "tomatoes") else cfg
+    flags: list[str] = []
+    suspect = False
+
+    if not a.contract.settlement_verified:
+        # The clerical failure, and on these markets the likeliest one.
+        # Which Tomatometer, whether the threshold is inclusive, and what
+        # time it settles are all read off the contract by a person.
+        flags.append("settlement_terms_unverified")
+        suspect = True
+
+    if a.contract.scope != a.snapshot.scope:
+        # All Critics against Top Critics on the same film differs by
+        # several points. Never compare the two.
+        flags.append(
+            f"scope_mismatch(contract {a.contract.scope} / "
+            f"snapshot {a.snapshot.scope})"
+        )
+        suspect = True
+
+    age = a.snapshot.age_hours(now)
+    if age > tc.max_snapshot_age_hours:
+        flags.append(f"snapshot_{age:.0f}h_old")
+        suspect = True
+
+    if a.decided is not None:
+        # The good case, and worth naming: no model is involved, so none
+        # of the modelling guards below can apply to it.
+        flags.append(
+            f"decided_by_arithmetic(score must land in {a.bounds.low}-"
+            f"{a.bounds.high}%)"
+        )
+    else:
+        if a.snapshot.total < tc.min_reviews:
+            flags.append(f"only_{a.snapshot.total}_reviews_counted")
+            suspect = True
+        if a.drift_is_load_bearing:
+            # The honesty check, and the exact analogue of
+            # `only_+ev_because_of_assumed_correlation` on the parlay side.
+            flags.append("only_+ev_because_of_assumed_drift")
+            suspect = True
+        if tc.drift != 0.0:
+            flags.append(f"drift_prior_{tc.drift:+.2f}_applied_not_measured")
+
+    if a.ev > tc.max_plausible_ev and a.decided is None:
+        # A large edge on an undecided contract means a stale snapshot or
+        # the wrong settlement terms far more often than it means an edge.
+        flags.append(f"ev_{a.ev:.0%}_implausible")
+        suspect = True
+
+    if a.maker:
+        # It is only a maker fee if the order rests and gets filled. An EV
+        # computed at the maker rate on an order you then cross with is
+        # wrong by four times the fee.
+        flags.append("priced_as_maker(only true if the order rests)")
+
+    a.flags = flags
+    a.suspect = suspect
+    return a
+
+
+def position_size(a: Assessment, bankroll: float, cfg) -> float:
+    """
+    What to stake, or nothing.
+
+    Fractional Kelly on the fee-adjusted odds, capped. A suspect
+    assessment gets zero -- not a reduced size -- because the flags above
+    are reasons to think the number is wrong, and a smaller stake on a
+    wrong number is still a bet on a wrong number.
+    """
+    tc = cfg.tomatoes if hasattr(cfg, "tomatoes") else cfg
+    if a.suspect or a.ev <= tc.min_ev or bankroll <= 0:
+        return 0.0
+    cost = a.price + fee(1, a.price, a.maker)
+    if cost <= 0 or cost >= 1.0:
+        # Nothing to win: the fee has eaten the whole spread to a dollar.
+        return 0.0
+    # Kelly on a binary paying (1 - cost) per unit committed.
+    b = (1.0 - cost) / cost
+    edge = a.probability * b - (1.0 - a.probability)
+    if edge <= 0:
+        return 0.0
+    fraction = (edge / b) * tc.kelly_multiplier
+    return round(
+        min(fraction, tc.max_position_fraction) * bankroll, 2
+    )

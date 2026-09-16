@@ -501,3 +501,200 @@ class TestAssessment:
 
     def test_the_edge_is_reported_in_probability(self):
         assert self.build(0.1, 0.1).edge == pytest.approx(0.05)
+
+
+# --------------------------------------------------------------------------
+# assess(): the guards
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tcfg():
+    from betedge.config import TomatoesConfig
+
+    # Verified-by-default is wrong for real use but right for these tests:
+    # otherwise every case trips the settlement guard and nothing else is
+    # ever exercised. The unverified path has its own test below.
+    return TomatoesConfig()
+
+
+def verified(threshold=60, **kw):
+    kw.setdefault("settlement_verified", True)
+    return contract(threshold, **kw)
+
+
+class TestAssessGuards:
+    def test_an_unverified_contract_is_never_staked(self, tcfg):
+        # The likeliest failure on these markets is clerical, not
+        # statistical: the wrong Tomatometer or the wrong inclusivity.
+        a = T.assess(snap(169, 180), contract(60), price=0.80, cfg=tcfg, now=NOW)
+        assert "settlement_terms_unverified" in a.flags
+        assert a.suspect
+        assert T.position_size(a, 1000.0, tcfg) == 0.0
+
+    def test_a_decided_contract_says_so_and_names_the_range(self, tcfg):
+        a = T.assess(snap(169, 180), verified(60), price=0.80, cfg=tcfg,
+                     now=NOW, max_new_reviews=40)
+        assert a.decided is True
+        assert any("decided_by_arithmetic" in f for f in a.flags)
+        assert "77-95%" in " ".join(a.flags)
+        assert not a.suspect
+
+    def test_a_decided_contract_bought_below_par_is_a_real_position(self, tcfg):
+        a = T.assess(snap(169, 180), verified(60), price=0.80, cfg=tcfg,
+                     now=NOW, max_new_reviews=40)
+        assert a.probability == pytest.approx(1.0)
+        assert a.ev > 0.2
+        assert T.position_size(a, 1000.0, tcfg) > 0
+
+    def test_a_stale_snapshot_is_not_a_measurement(self, tcfg):
+        old = snap(169, 180, at=NOW - timedelta(hours=30))
+        a = T.assess(old, verified(60), price=0.80, cfg=tcfg, now=NOW)
+        assert any("snapshot_30h_old" in f for f in a.flags)
+        assert a.suspect
+        assert T.position_size(a, 1000.0, tcfg) == 0.0
+
+    def test_comparing_two_different_tomatometers_is_refused(self, tcfg):
+        # All Critics against Top Critics on the same film differs by
+        # several points. Same rule as never comparing two prop lines.
+        a = T.assess(
+            snap(169, 180, scope=T.SCOPE_ALL_CRITICS),
+            verified(60, scope=T.SCOPE_TOP_CRITICS),
+            price=0.80, cfg=tcfg, now=NOW,
+        )
+        assert any("scope_mismatch" in f for f in a.flags)
+        assert a.suspect
+
+    def test_too_few_reviews_is_refused_on_an_open_contract(self, tcfg):
+        a = T.assess(snap(8, 9), verified(70), price=0.50, cfg=tcfg, now=NOW)
+        assert a.decided is None
+        assert any("only_9_reviews_counted" in f for f in a.flags)
+        assert a.suspect
+
+    def test_but_a_tiny_sample_can_still_decide_a_contract(self, tcfg):
+        # Nine reviews all Fresh cannot produce a score below 13% even if
+        # sixty rotten ones arrive. Arithmetic does not care about sample
+        # size, and the guard must not override it.
+        a = T.assess(snap(9, 9), verified(10), price=0.90, cfg=tcfg, now=NOW)
+        assert a.decided is True
+        assert not a.suspect
+
+    def test_an_implausible_edge_means_a_mistake_not_an_opportunity(self, tcfg):
+        a = T.assess(snap(100, 150), verified(55), price=0.20, cfg=tcfg, now=NOW)
+        assert a.decided is None
+        assert any("implausible" in f for f in a.flags)
+        assert a.suspect
+
+    def test_a_decided_contract_is_exempt_from_the_plausibility_ceiling(self, tcfg):
+        # A 60% edge on a contract settled by counting is not implausible,
+        # it is the product working.
+        a = T.assess(snap(169, 180), verified(60), price=0.55, cfg=tcfg,
+                     now=NOW, max_new_reviews=40)
+        assert a.ev > tcfg.max_plausible_ev
+        assert not any("implausible" in f for f in a.flags)
+        assert T.position_size(a, 1000.0, tcfg) > 0
+
+    def test_maker_pricing_is_disclosed(self, tcfg):
+        a = T.assess(snap(169, 180), verified(60), price=0.80, cfg=tcfg,
+                     now=NOW, maker=True)
+        assert any("priced_as_maker" in f for f in a.flags)
+
+    def test_takers_are_assumed_by_default(self, tcfg):
+        # Assuming the maker fee would flatter every position by four
+        # times the fee.
+        assert tcfg.assume_maker is False
+
+
+class TestAssessDrift:
+    def test_drift_that_carries_the_bet_is_refused(self):
+        """
+        Built directly rather than searched for, so the assertion cannot
+        quietly evaporate: an assessment that is +EV with the drift and
+        -EV without it must be flagged and must get no money.
+        """
+        from betedge.config import TomatoesConfig
+
+        cfg = TomatoesConfig(drift=-1.5)
+        s = snap(120, 150)
+        a = T.Assessment(
+            contract=verified(78), snapshot=s, price=0.50,
+            probability=0.58, probability_no_drift=0.48,
+            bounds=T.bounds(s, 60), decided=None,
+            ev=0.12, ev_no_drift=-0.06,
+        )
+        assert a.drift_is_load_bearing
+        T.apply_guards(a, cfg, now=NOW)
+        assert "only_+ev_because_of_assumed_drift" in a.flags
+        assert a.suspect
+        assert T.position_size(a, 1000.0, cfg) == 0.0
+
+    def test_a_bet_that_survives_without_drift_still_gets_money(self):
+        from betedge.config import TomatoesConfig
+
+        cfg = TomatoesConfig(drift=-1.5)
+        s = snap(120, 150)
+        a = T.Assessment(
+            contract=verified(78), snapshot=s, price=0.50,
+            probability=0.62, probability_no_drift=0.58,
+            bounds=T.bounds(s, 60), decided=None,
+            ev=0.20, ev_no_drift=0.12,
+        )
+        T.apply_guards(a, cfg, now=NOW)
+        assert "only_+ev_because_of_assumed_drift" not in a.flags
+        assert not a.suspect
+        assert T.position_size(a, 1000.0, cfg) > 0
+
+    def test_an_applied_drift_is_always_disclosed(self):
+        from betedge.config import TomatoesConfig
+
+        cfg = TomatoesConfig(drift=0.6)
+        a = T.assess(snap(120, 150), verified(78), price=0.50, cfg=cfg, now=NOW)
+        assert any("drift_prior" in f and "not_measured" in f for f in a.flags)
+
+    def test_with_no_drift_the_two_numbers_are_the_same(self, tcfg):
+        a = T.assess(snap(120, 150), verified(78), price=0.5, cfg=tcfg, now=NOW)
+        assert a.probability == a.probability_no_drift
+        assert not a.drift_is_load_bearing
+
+
+class TestPositionSize:
+    def test_nothing_is_staked_below_the_ev_bar(self, tcfg):
+        a = T.assess(snap(120, 150), verified(60), price=0.99, cfg=tcfg, now=NOW)
+        assert a.ev < tcfg.min_ev
+        assert T.position_size(a, 1000.0, tcfg) == 0.0
+
+    def test_a_suspect_assessment_gets_nothing_not_less(self, tcfg):
+        # A smaller stake on a number you think is wrong is still a bet on
+        # a number you think is wrong.
+        a = T.assess(snap(169, 180), contract(60), price=0.60, cfg=tcfg, now=NOW)
+        assert a.suspect and a.ev > 0
+        assert T.position_size(a, 1000.0, tcfg) == 0.0
+
+    def test_the_cap_binds_before_kelly_does(self, tcfg):
+        a = T.assess(snap(169, 180), verified(60), price=0.50, cfg=tcfg,
+                     now=NOW, max_new_reviews=40)
+        size = T.position_size(a, 10_000.0, tcfg)
+        assert size == pytest.approx(10_000.0 * tcfg.max_position_fraction)
+
+    def test_it_scales_with_the_bankroll(self, tcfg):
+        a = T.assess(snap(169, 180), verified(60), price=0.80, cfg=tcfg,
+                     now=NOW, max_new_reviews=40)
+        assert T.position_size(a, 2000.0, tcfg) == pytest.approx(
+            2 * T.position_size(a, 1000.0, tcfg)
+        )
+
+    def test_an_empty_bankroll_stakes_nothing(self, tcfg):
+        a = T.assess(snap(169, 180), verified(60), price=0.80, cfg=tcfg, now=NOW)
+        assert T.position_size(a, 0.0, tcfg) == 0.0
+
+    def test_a_price_the_fee_has_eaten_stakes_nothing(self, tcfg):
+        # At 99c the fee alone can leave nothing to win.
+        a = T.assess(snap(169, 180), verified(60), price=0.995, cfg=tcfg, now=NOW)
+        assert T.position_size(a, 1000.0, tcfg) == 0.0
+
+    def test_staking_is_stricter_than_the_single_bet_path(self):
+        from betedge.config import Config
+
+        cfg = Config()
+        assert cfg.tomatoes.kelly_multiplier < cfg.bankroll.kelly_multiplier
+        assert cfg.tomatoes.max_position_fraction < cfg.bankroll.max_fraction

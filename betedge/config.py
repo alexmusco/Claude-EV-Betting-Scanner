@@ -307,6 +307,50 @@ class BudgetConfig:
 
 
 @dataclass
+class TomatoesConfig:
+    """
+    Rotten Tomatoes threshold contracts on Kalshi. See tomatoes.py.
+
+    Stricter again than the parlay path, for a reason that has nothing to
+    do with the maths: these markets are thin and settle on a number a
+    third party rounds, so the ways to be wrong are clerical rather than
+    statistical and the guards are aimed there.
+    """
+
+    # A snapshot older than this is not a measurement of anything -- the
+    # score moves whenever a review lands, and the whole edge is knowing
+    # the count NOW.
+    max_snapshot_age_hours: float = 12.0
+    # Below this many counted reviews the posterior is too wide to mean
+    # anything, whatever it says.
+    min_reviews: int = 15
+    # Ceiling on further reviews when nothing better is known. Deliberately
+    # generous: it only ever makes the tool more cautious.
+    default_max_new_reviews: int = 60
+    # Expected further reviews, for the probabilistic branch.
+    default_expected_new_reviews: float = 20.0
+    # Weak and symmetric, worth about four reviews.
+    prior_alpha: float = 2.0
+    prior_beta: float = 2.0
+    # Log-odds shift applied to LATER reviews. Zero by default and a PRIOR,
+    # not a measurement -- see tomatoes.py. Anything only +EV because of
+    # it is flagged and staked at nothing.
+    drift: float = 0.0
+    # The EV bar, and the ceiling above which an edge means a mistake
+    # rather than an opportunity.
+    min_ev: float = 0.03
+    max_plausible_ev: float = 0.40
+    # Kelly, stricter than the single-bet quarter. These settle in days and
+    # cannot be hedged out of cheaply.
+    kelly_multiplier: float = 0.125
+    max_position_fraction: float = 0.01
+    # Positions are assumed to cross the spread unless told otherwise: the
+    # taker fee is four times the maker fee, so assuming the cheap one
+    # would flatter every position the tool prints.
+    assume_maker: bool = False
+
+
+@dataclass
 class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     books: BooksConfig = field(default_factory=BooksConfig)
@@ -314,6 +358,7 @@ class Config:
     bankroll: BankrollConfig = field(default_factory=BankrollConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     parlay: ParlayConfig = field(default_factory=ParlayConfig)
+    tomatoes: TomatoesConfig = field(default_factory=TomatoesConfig)
     # Sports scanned for PLAYER PROPS. Expensive: one call per event per
     # market off the per-event endpoint.
     sports: list[str] = field(
@@ -375,6 +420,7 @@ class Config:
             bankroll=BankrollConfig(**raw.get("bankroll", {})),
             budget=BudgetConfig(**raw.get("budget", {})),
             parlay=ParlayConfig(**raw.get("parlay", {})),
+            tomatoes=TomatoesConfig(**raw.get("tomatoes", {})),
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
             excluded_sports=(
