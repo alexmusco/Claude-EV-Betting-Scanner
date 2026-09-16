@@ -78,6 +78,36 @@ TOLERANCE_AFTER_HOURS = 14.0
 #: Kept for callers that want one symmetric number.
 DEFAULT_TIME_TOLERANCE_HOURS = 8.0
 
+#: How long AFTER kickoff an exchange's timestamp may still be this
+#: game's, per sport.
+#:
+#: The number is not about how long a game lasts. It is about how soon
+#: the same two teams could meet again, because that is the only thing
+#: the time check is defending against -- two teams name one fixture
+#: unambiguously unless they play twice.
+#:
+#: NFL teams meet roughly twice a season, weeks apart, so a wide window
+#: costs nothing. Baseball and hockey play the same opponent on
+#: consecutive days, so theirs must stay tight or a Tuesday market would
+#: happily price against Monday's game.
+#:
+#: This exists because Kalshi's close_time turned out not to be the final
+#: whistle at all: on an NFL board it sat 48 hours past kickoff, batched
+#: to some later expiry. Guessing at what a venue's timestamp MEANS is a
+#: losing game; bounding how wrong it can be before it matters is not.
+AFTER_HOURS_BY_SPORT = {
+    "americanfootball_nfl": 120.0,
+    "americanfootball_ncaaf": 120.0,
+    "basketball_nba": 20.0,
+    "icehockey_nhl": 20.0,
+    "baseball_mlb": 16.0,
+}
+
+
+def after_hours_for(sport: str) -> float:
+    """The forward window for a sport, defaulting to the tight one."""
+    return AFTER_HOURS_BY_SPORT.get(sport or "", TOLERANCE_AFTER_HOURS)
+
 
 class MatchError(RuntimeError):
     """The two sides could not be joined with any confidence."""
@@ -173,18 +203,20 @@ class MatchResult:
         return (self.event or {}).get("id")
 
 
-def _within_window(hours_apart: float, tolerance_hours: float | None) -> bool:
+def _within_window(hours_apart: float, tolerance_hours: float | None,
+                   after_hours: float | None = None) -> bool:
     """
     Whether a market's time is consistent with this game's kickoff.
 
     `hours_apart` is market time minus kickoff, so positive means the
     market's stamp is LATER -- which is the normal case for an exchange
-    quoting a close.
+    quoting a close rather than a start.
     """
     if tolerance_hours is not None \
             and tolerance_hours != DEFAULT_TIME_TOLERANCE_HOURS:
         return abs(hours_apart) <= tolerance_hours
-    return -TOLERANCE_BEFORE_HOURS <= hours_apart <= TOLERANCE_AFTER_HOURS
+    forward = TOLERANCE_AFTER_HOURS if after_hours is None else after_hours
+    return -TOLERANCE_BEFORE_HOURS <= hours_apart <= forward
 
 
 def _start_of(event) -> datetime | None:
@@ -198,6 +230,7 @@ def match_event(
     events,
     close_time: datetime | None = None,
     tolerance_hours: float = DEFAULT_TIME_TOLERANCE_HOURS,
+    sport: str = "",
 ) -> MatchResult:
     """
     Find the odds-feed event a Kalshi title is about.
@@ -231,16 +264,19 @@ def match_event(
                            "no event names both of these teams")
 
     if close_time is not None:
+        forward = after_hours_for(sport)
         timed = [c for c in candidates
                  if c.hours_apart is None
-                 or _within_window(c.hours_apart, tolerance_hours)]
+                 or _within_window(c.hours_apart, tolerance_hours, forward)]
         if not timed:
             nearest = min(candidates, key=lambda c: abs(c.hours_apart or 0))
             return MatchResult(
                 nearest.event, False,
                 f"both teams match but the times are "
-                f"{nearest.hours_apart:+.0f}h apart -- probably a "
-                "different meeting of the same two teams",
+                f"{nearest.hours_apart:+.0f}h apart, outside the "
+                f"-{TOLERANCE_BEFORE_HOURS:g}h to +{forward:g}h window "
+                f"for {sport or 'this sport'} -- probably a different "
+                "meeting of the same two teams",
                 candidates=len(candidates),
             )
         candidates = timed
@@ -264,7 +300,9 @@ def match_event(
     return MatchResult(best.event, True, detail, candidates=1)
 
 
-def match_markets(markets, events, tolerance_hours=DEFAULT_TIME_TOLERANCE_HOURS):
+def match_markets(markets, events,
+                  tolerance_hours=DEFAULT_TIME_TOLERANCE_HOURS,
+                  sport: str = ""):
     """
     Join a list of Kalshi markets to odds-feed events.
 
@@ -281,7 +319,7 @@ def match_markets(markets, events, tolerance_hours=DEFAULT_TIME_TOLERANCE_HOURS)
         ]))
         result = match_event(
             title, events, close_time=getattr(market, "close_time", None),
-            tolerance_hours=tolerance_hours,
+            tolerance_hours=tolerance_hours, sport=sport,
         )
         if result.confident:
             matched.append((market, result))

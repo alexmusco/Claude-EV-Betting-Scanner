@@ -890,7 +890,7 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
             continue
 
         matched, unmatched = matching.match_markets(
-            markets, [ln.event for ln in lines]
+            markets, [ln.event for ln in lines], sport=sport
         )
         result.unmatched.extend(unmatched)
 

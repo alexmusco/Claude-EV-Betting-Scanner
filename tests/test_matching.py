@@ -267,3 +267,79 @@ class TestMatchMarkets:
 
     def test_nothing_to_match_is_not_an_error(self):
         assert M.match_markets([], [CHIEFS]) == ([], [])
+
+
+class TestSportAwareWindow:
+    """
+    The window is not about how long a game lasts. It is about how soon
+    the same two teams could meet again, because that is the only thing
+    it defends against -- two teams name one fixture unambiguously unless
+    they play twice.
+
+    This came from Kalshi's close_time turning out not to be the final
+    whistle at all: on an NFL board it sat 48 hours past kickoff, batched
+    to some later expiry.
+    """
+
+    def test_an_nfl_market_two_days_past_kickoff_still_matches(self):
+        # The case that rejected a whole Week 3 slate.
+        result = M.match_event(
+            "Chiefs vs Broncos", [CHIEFS],
+            close_time=NOW + timedelta(hours=48),
+            sport="americanfootball_nfl",
+        )
+        assert result.confident
+
+    def test_the_same_gap_is_refused_for_baseball(self):
+        # Two teams play three days running, so Tuesday's market must not
+        # price against Monday's game.
+        game = event("Los Angeles Dodgers", "San Diego Padres", eid="mlb")
+        result = M.match_event(
+            "Dodgers vs Padres", [game],
+            close_time=NOW + timedelta(hours=48), sport="baseball_mlb",
+        )
+        assert not result.confident
+        assert "baseball_mlb" in result.reason
+
+    def test_an_unknown_sport_gets_the_tight_window(self):
+        # Failing closed: a sport nobody has thought about should not
+        # inherit football's generosity.
+        result = M.match_event(
+            "Chiefs vs Broncos", [CHIEFS],
+            close_time=NOW + timedelta(hours=48), sport="quidditch",
+        )
+        assert not result.confident
+
+    def test_the_reason_names_the_window_it_failed(self):
+        # So the next step is obvious rather than another round trip.
+        result = M.match_event(
+            "Dodgers vs Padres",
+            [event("Los Angeles Dodgers", "San Diego Padres", eid="mlb")],
+            close_time=NOW + timedelta(hours=48), sport="baseball_mlb",
+        )
+        assert "+16h window" in result.reason
+
+    def test_no_sport_still_works_on_an_ordinary_gap(self):
+        result = M.match_event("Chiefs vs Broncos", [CHIEFS],
+                               close_time=NOW + timedelta(hours=4))
+        assert result.confident
+
+    def test_a_week_later_is_out_of_reach_even_for_football(self):
+        # The window has to stay short of the same two teams playing
+        # again, which for the NFL is the next season series.
+        result = M.match_event(
+            "Chiefs vs Broncos", [CHIEFS],
+            close_time=NOW + timedelta(days=10),
+            sport="americanfootball_nfl",
+        )
+        assert not result.confident
+
+    def test_backwards_stays_tight_whatever_the_sport(self):
+        # A market closing before kickoff is a puzzle, not a tolerance,
+        # and football's wide forward window must not loosen that.
+        result = M.match_event(
+            "Chiefs vs Broncos", [CHIEFS],
+            close_time=NOW - timedelta(hours=8),
+            sport="americanfootball_nfl",
+        )
+        assert not result.confident
