@@ -60,28 +60,35 @@ class KalshiError(RuntimeError):
 
 CERTIFICATE_HELP = """could not verify the TLS certificate.
 
-This is your machine's certificate store, not Kalshi. Note that if other
-hosts (the odds API) work from the same environment, Python HAS a bundle
--- it is just missing or has outdated the root this host chains to. The
-usual cause is a server that does not send its full intermediate chain:
-curl fetches the missing link and Python does not.
+Two quite different causes, and they need opposite responses. Find out
+which one this is before doing anything:
 
-In order:
+    openssl s_client -connect <host>:443 -servername <host> </dev/null \\
+        2>&1 | grep -E "^(subject|issuer)="
+
+INTERCEPTION -- the issuer is some product or network appliance rather
+than a public CA (Amazon, Let's Encrypt, DigiCert), and the certificate
+often has a validity of a day or less. Something is sitting between you
+and the venue and reading the traffic. Frequently a DNS filter: check
+whether several hostnames on the domain resolve to one shared address,
+which a real CDN-backed site would not. Updating certifi will not help
+and trusting that issuer would mean deliberately letting a third party
+read everything you send the exchange -- including, later, orders.
+Change network, or deal with the filter at its source.
+
+A STALE OR INCOMPLETE CHAIN -- the issuer IS a public CA. Then:
 
     pip install --upgrade certifi
 
-then, if it still fails and you installed Python from python.org:
+inside the virtualenv you actually run from, and if that fails and you
+installed Python from python.org, its Install Certificates.command --
+though note that script targets the framework Python and ignores your
+virtualenv, so it often changes nothing.
 
-    /Applications/Python\ 3.x/Install\ Certificates.command
-
-To see which of the two it is:
-
-    curl -sS -o /dev/null -w '%{http_code}\n' <the url above>
-
-curl succeeding where Python fails means the chain, not the store.
-
-Do NOT disable verification to get past this. An unverified connection
-to a trading venue is worth less than no connection to one."""
+Either way: do NOT disable verification to get past this. An unverified
+connection to a trading venue is worth less than no connection to one,
+and it is exactly the situation where knowing who you are talking to is
+the point."""
 
 
 def _explain_ssl(exc: Exception, url: str) -> Exception:

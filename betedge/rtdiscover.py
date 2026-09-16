@@ -316,7 +316,19 @@ def collect_markets(client, series_ticker=None, status="open", max_pages=25):
     try:
         events = client.events(series_ticker=series_ticker, status=status,
                                max_pages=max_pages)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Only an endpoint that is missing justifies the fallback. A
+        # connection failure must propagate: retrying it against a second
+        # endpoint doubles the wait and then reports the SECOND error,
+        # hiding the first and more informative one.
+        from .kalshi import _is_certificate_error
+
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if _is_certificate_error(exc) or any(
+            word in text for word in
+            ("connection", "timeout", "timed out", "resolve", "unreachable")
+        ):
+            raise
         events = None
 
     if events:

@@ -450,3 +450,38 @@ class TestGrep:
             {"ticker": "FED-1", "subtitle": "Cut", "status": "active"}
         ])])
         assert D.grep_titles(client, "tomato") == []
+
+
+class TestFallbackDiscipline:
+    """
+    The events endpoint falls back to the flat market list, but only for
+    the right reason. A connection failure retried against a second
+    endpoint doubles the wait and then reports the SECOND error, hiding
+    the first and more informative one.
+    """
+
+    def _client(self, exc):
+        class Failing(EventClient):
+            def events(self, **kw):
+                raise exc
+
+        return Failing([], [market()])
+
+    @pytest.mark.parametrize("exc", [
+        RuntimeError("certificate verify failed: unable to get local issuer"),
+        RuntimeError("Max retries exceeded: Connection refused"),
+        RuntimeError("Read timed out"),
+        RuntimeError("Failed to resolve host"),
+    ])
+    def test_a_connection_failure_propagates(self, exc):
+        client = self._client(exc)
+        with pytest.raises(RuntimeError):
+            D.discover(client, fetcher_for({}))
+        assert client.markets_called is False
+
+    def test_a_missing_endpoint_still_falls_back(self):
+        client = self._client(RuntimeError("404 not found"))
+        sweep = D.discover(client,
+                           fetcher_for({"resident_evil": "Resident Evil"}))
+        assert client.markets_called is True
+        assert sweep.source == "markets"
