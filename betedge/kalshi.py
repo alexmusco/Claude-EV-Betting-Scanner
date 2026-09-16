@@ -147,6 +147,12 @@ class Market:
     open_interest: int = 0
     close_time: datetime | None = None
     event_ticker: str = ""
+    #: The exchange's own settlement rules. Carried through so that
+    #: verifying a contract is reading a paragraph in a local file rather
+    #: than going back to the site -- which is the whole point of
+    #: discovering markets automatically.
+    rules: str = ""
+    subtitle: str = ""
 
     @property
     def is_open(self) -> bool:
@@ -189,6 +195,11 @@ def parse_market(raw: dict) -> Market:
     market = Market(
         ticker=str(raw["ticker"]),
         title=str(raw.get("title") or raw.get("subtitle") or ""),
+        subtitle=str(raw.get("subtitle") or raw.get("yes_sub_title") or ""),
+        rules=" ".join(
+            str(raw.get(key) or "").strip()
+            for key in ("rules_primary", "rules_secondary")
+        ).strip(),
         status=str(raw.get("status") or "unknown"),
         yes_bid=_cents_to_probability(raw.get("yes_bid")),
         yes_ask=_cents_to_probability(raw.get("yes_ask")),
@@ -315,6 +326,32 @@ class MarketData:
         payload = self._get(f"/markets/{ticker}/orderbook",
                             {"depth": depth})
         return parse_orderbook(payload, ticker=ticker)
+
+    def events(self, series_ticker: str | None = None, status: str | None = "open",
+               limit: int = 200, max_pages: int = 10) -> list[dict]:
+        """
+        Raw event objects, for discovery.
+
+        Returned as dicts rather than parsed: discovery is looking for
+        markets whose SHAPE is not yet known, and a parser would have to
+        guess at exactly the moment guessing is worst.
+        """
+        params: dict = {"limit": min(limit, 200), "with_nested_markets": "true"}
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if status:
+            params["status"] = status
+        found: list[dict] = []
+        cursor = None
+        for _ in range(max_pages):
+            if cursor:
+                params["cursor"] = cursor
+            payload = self._get("/events", params)
+            found.extend(payload.get("events") or [])
+            cursor = payload.get("cursor")
+            if not cursor:
+                break
+        return found
 
     def markets(
         self,

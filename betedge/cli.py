@@ -809,6 +809,93 @@ def cmd_rt_snapshot(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_rt_discover(cfg: Config, args) -> int:
+    """
+    Find Rotten Tomatoes markets on Kalshi and write the contracts file.
+
+    This automates the typing, not the checking. Whether a threshold is
+    inclusive and which Tomatometer settles it live in the exchange's
+    rules text rather than in any structured field, so the rules are
+    written INTO the file beside each row and every row lands
+    `verified: false`. Verifying becomes reading a paragraph here instead
+    of browsing the site, which is the saving that was actually available.
+    """
+    from . import kalshi, rtdiscover, rtfetch
+    from .tomatoes import ContractBook, USER_CONTRACTS_PATH
+
+    client = kalshi.MarketData()
+
+    def fetcher(slug):
+        return rtfetch.fetch(slug, cache_dir=args.cache)
+
+    try:
+        proposals = rtdiscover.discover(
+            client, fetcher, series_ticker=args.series,
+            status=None if args.all else "open",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not reach Kalshi: {exc}")
+        return 1
+
+    if not proposals:
+        print("No Rotten Tomatoes markets found"
+              + (f" under series {args.series}." if args.series else "."))
+        print("\nKalshi moves series tickers around. Find one RT market in "
+              "the app, and pass its series with --series.")
+        print(f"({client.requests_made} request(s) made.)")
+        return 0
+
+    ready = [p for p in proposals if p.usable]
+    print(f"Found {len(proposals)} Rotten Tomatoes market(s); "
+          f"{len(ready)} with a threshold and a confirmed film page.\n")
+    for p in sorted(proposals, key=lambda x: x.film):
+        mark = "ok " if p.usable else "?? "
+        print(f"{mark}{p.ticker:<28} {p.describe()}")
+        if p.slug_confirmed:
+            print(f"     rotten tomatoes: /m/{p.slug}")
+        for problem in p.problems:
+            print(f"     ! {problem}")
+
+    if not args.write:
+        print("\nNothing written. Re-run with --write to create the "
+              "contracts file.")
+        return 0
+
+    target = Path(args.out) if args.out else USER_CONTRACTS_PATH
+    existing = None
+    if target.exists():
+        try:
+            existing = ContractBook.load(target)
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing and existing.contracts and not args.replace:
+            print(f"\n{target} already has {len(existing.contracts)} "
+                  "contract(s). Only new tickers will be appended; pass "
+                  "--replace to rewrite the file.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    body = rtdiscover.to_yaml(
+        proposals, existing=None if args.replace else existing
+    )
+    if existing and existing.contracts and not args.replace:
+        # Appending rather than clobbering: the existing rows may already
+        # be verified, and a rewrite would silently un-verify them.
+        keep = target.read_text().rstrip()
+        added = body.split("contracts:", 1)[1].strip("\n")
+        if not added.strip():
+            print("\nNothing new to add.")
+            return 0
+        target.write_text(f"{keep}\n{added}\n")
+    else:
+        target.write_text(body)
+
+    print(f"\nWrote {target}.")
+    print("Every row is `verified: false` and staked at nothing. Read the "
+          "RULES comment above each one, answer anything marked QUESTION, "
+          "then set `verified: true`.")
+    return 0
+
+
 def cmd_rt_scan(cfg: Config, args) -> int:
     """
     Price every contract, and say what to buy.
@@ -2015,6 +2102,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=lambda cfg, args: (
         _init_rt_contracts(cfg) if args.init else cmd_rt_contracts(cfg, args)
     ))
+
+    s = rtsub.add_parser(
+        "discover",
+        help="find RT markets on Kalshi and write the contracts file",
+    )
+    s.add_argument("--series", metavar="TICKER",
+                   help="narrow to one Kalshi series. Without it, every "
+                        "open market is scanned for Rotten Tomatoes ones")
+    s.add_argument("--write", action="store_true",
+                   help="write the contracts file. Without this it only "
+                        "prints what it found")
+    s.add_argument("--out", metavar="PATH", help="where to write")
+    s.add_argument("--replace", action="store_true",
+                   help="rewrite the file instead of appending new tickers. "
+                        "This un-verifies everything already in it")
+    s.add_argument("--all", action="store_true",
+                   help="include closed and settled markets")
+    s.add_argument("--cache", metavar="DIR", help="where to cache RT pages")
+    s.set_defaults(func=cmd_rt_discover)
 
     s = rtsub.add_parser("snapshot", help="read a film's Tomatometer now")
     s.add_argument("slug", help="the part of the URL after /m/")
