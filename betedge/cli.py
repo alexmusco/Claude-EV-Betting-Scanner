@@ -831,6 +831,11 @@ def cmd_rt_discover(cfg: Config, args) -> int:
         return rtfetch.fetch(slug, cache_dir=args.cache)
 
     if args.grep:
+        # nargs="+" so that `--grep box office` works: unquoted phrases
+        # are the natural thing to type and argparse would otherwise read
+        # the second word as a stray positional and abort the run.
+        args.grep = " ".join(args.grep) if isinstance(args.grep, list) \
+            else args.grep
         # Finding where a kind of market lives on the exchange. Better
         # than being told to go look in the app.
         try:
@@ -2169,10 +2174,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "This un-verifies everything already in it")
     s.add_argument("--all", action="store_true",
                    help="include closed and settled markets")
-    s.add_argument("--grep", metavar="TEXT",
+    s.add_argument("--grep", metavar="TEXT", nargs="+",
                    help="instead of discovering, print every market whose "
                         "title mentions TEXT, with its series. For finding "
-                        "where a kind of market lives on the exchange")
+                        "where a kind of market lives on the exchange. "
+                        "Several words are joined, so quoting is optional")
     s.add_argument("--cache", metavar="DIR", help="where to cache RT pages")
     s.add_argument("--base-url", dest="base_url", metavar="URL",
                    help="Kalshi API base. They have moved it before, "
