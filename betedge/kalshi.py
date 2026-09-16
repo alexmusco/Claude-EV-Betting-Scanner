@@ -429,6 +429,23 @@ class MarketData:
                             {"depth": depth})
         return parse_orderbook(payload, ticker=ticker)
 
+    def series(self, category: str | None = None) -> list[dict]:
+        """
+        The exchange's series list.
+
+        Far cheaper than sweeping events to find where a sport lives: a
+        series is a whole recurring market type, so there are hundreds
+        rather than tens of thousands. Returned raw because the shape is
+        not confirmed against a live response, and a parser would have to
+        guess at exactly the point guessing is worst.
+        """
+        params = {}
+        if category:
+            params["category"] = category
+        payload = self._get("/series", params)
+        found = payload.get("series") or payload.get("data") or []
+        return found if isinstance(found, list) else []
+
     def events(self, series_ticker: str | None = None, status: str | None = "open",
                limit: int = 200, max_pages: int = 10) -> list[dict]:
         """

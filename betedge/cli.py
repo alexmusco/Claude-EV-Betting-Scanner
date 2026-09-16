@@ -782,8 +782,37 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
         # Finding where a kind of market lives, when the sweep comes back
         # empty. Better than being told to guess a series ticker.
         wanted = " ".join(args.grep).lower()
+
+        # Try the series list first. A series is a whole recurring market
+        # type, so there are hundreds rather than tens of thousands --
+        # which makes finding where a sport lives a cheap lookup instead
+        # of a blind sweep that may never reach it.
         try:
-            events = market_data.events(status="open", max_pages=25)
+            catalogue = market_data.series()
+        except Exception:  # noqa: BLE001
+            catalogue = []
+        if catalogue:
+            matches = [
+                row for row in catalogue
+                if wanted in " ".join(str(row.get(k) or "") for k in
+                                      ("ticker", "title", "category",
+                                       "sub_title")).lower()
+            ]
+            print(f"{len(catalogue):,} series on the exchange; "
+                  f"{len(matches)} mention {wanted!r}.\n")
+            for row in matches[:40]:
+                print(f"  {str(row.get('ticker') or '?'):<26} "
+                      f"{str(row.get('title') or '')[:52]}")
+            if matches:
+                first = matches[0].get("ticker")
+                print(f"\nTry:  betedge kalshi scan --series {first}")
+                print(f"({market_data.requests_made} Kalshi request(s))")
+                db.close()
+                return 0
+            print("Falling back to sweeping events...\n")
+
+        try:
+            events = market_data.events(status="open", max_pages=40)
         except Exception as exc:  # noqa: BLE001
             print(f"Could not reach Kalshi: {exc}")
             db.close()
@@ -797,6 +826,12 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
         if not hits:
             print(f"Nothing in {len(events):,} open event(s) mentions "
                   f"{wanted!r}.")
+            if len(events) >= 40 * 200:
+                # The distinction that keeps being worth making: not
+                # finding something in a complete sweep and not finding
+                # it in a partial one are different answers.
+                print("That hit the paging cap, so it is NOT the whole "
+                      "exchange.")
         else:
             print(f"{sum(len(v) for v in hits.values())} event(s) mentioning "
                   f"{wanted!r}, across {len(hits)} series:\n")
