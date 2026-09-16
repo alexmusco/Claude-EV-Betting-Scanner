@@ -750,6 +750,220 @@ def cmd_report(cfg: Config, args) -> int:
 
 
 # ---------------------------------------------------------------------
+# Kalshi ladders
+# ---------------------------------------------------------------------
+
+
+def cmd_kalshi_scan(cfg: Config, args) -> int:
+    """
+    Price every rung Kalshi lists, against Pinnacle's main line.
+
+    One credit per sport buys the whole board off the bulk endpoint;
+    Kalshi's market data is free. The expensive part is the order books,
+    one request each, so the scan asks for depth only on rungs that
+    survive the join.
+    """
+    from . import kalshi, kalshiscan as KS, ladder, matching
+    from . import report as R
+
+    db = Database(cfg.database)
+    try:
+        client = build_client(cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Error: cannot reach the odds API: {exc}", file=sys.stderr)
+        db.close()
+        return 1
+
+    market_data = kalshi.MarketData(
+        base_url=args.base_url or cfg.kalshi.base_url
+    )
+    priors = ladder.PriorSet.load()
+    sports = args.sports or cfg.sports
+    result = KS.ScanResult()
+
+    for sport in sports:
+        try:
+            events = client.odds(sport, markets=("h2h", "spreads"),
+                                 bookmakers=(cfg.books.sharp,))
+        except Exception as exc:  # noqa: BLE001
+            print(f"{sport}: could not fetch the sharp line: {exc}")
+            continue
+        lines = KS.game_lines(events, sharp_book=cfg.books.sharp,
+                              devig_method=cfg.model.devig_method)
+        result.events_seen += len(events)
+        if not lines:
+            print(f"{sport}: {cfg.books.sharp} prices no complete game "
+                  "lines right now (both a spread and a moneyline are "
+                  "needed).")
+            continue
+
+        try:
+            markets = market_data.markets(series_ticker=args.series,
+                                          status="open")
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not reach Kalshi: {exc}")
+            db.close()
+            return 1
+        result.markets_seen += len(markets)
+
+        matched, unmatched = matching.match_markets(
+            markets, [ln.event for ln in lines]
+        )
+        result.unmatched.extend(unmatched)
+
+        by_event = {}
+        for market, match in matched:
+            by_event.setdefault(match.event_id, []).append(market)
+        line_by_event = {ln.event_id: ln for ln in lines}
+
+        for event_id, event_markets in by_event.items():
+            line = line_by_event.get(event_id)
+            if line is None:
+                continue
+            books = {}
+            for market in event_markets[:args.max_books]:
+                try:
+                    books[market.ticker] = market_data.orderbook(market.ticker)
+                except Exception:  # noqa: BLE001
+                    continue
+
+            game = KS.GameResult(line=line, model=None, matchup=line.matchup)
+            # The model-free check first: it survives every way the fit
+            # below can be wrong, so it is reported even when the fit
+            # fails outright.
+            game.incoherences = ladder.coherence_violations(
+                KS.rungs_for_coherence(event_markets, books)
+            )
+            try:
+                game.model = ladder.fit(
+                    line.spread, line.fair_win_prob, sport, priors
+                )
+            except ladder.LadderError as exc:
+                game.skipped.append((None, str(exc)))
+                result.games.append(game)
+                continue
+
+            game.quotes, game.skipped = KS.price_rungs(
+                game.model, line, event_markets, books, cfg, sport=sport
+            )
+            result.games.append(game)
+
+    result.requests = market_data.requests_made
+    result.credits = client.quota.spent_this_session
+    _log_spend(db, client, "kalshi")
+
+    _print_kalshi(result, cfg, args)
+
+    if cfg.notify.enabled and not args.no_notify and result.quotes:
+        playable = [q for q in result.quotes if q.ev >= cfg.notify.min_ev]
+        stats = notify_kalshi(cfg, db, playable,
+                              dry_run=args.dry_run_notify)
+        if stats["sent"]:
+            print(f"\nNotified: {stats['sent']} message(s).")
+        elif stats["quiet"]:
+            print("\nQuiet hours: nothing sent.")
+
+    db.close()
+    return 0
+
+
+def _print_kalshi(result, cfg, args) -> None:
+    from . import report as R
+
+    # Incoherences first: they need no model, no Pinnacle line and no
+    # fit, so they are the only thing here that survives every way the
+    # rest can be wrong.
+    if result.incoherences:
+        print("LADDER INCOHERENT -- no view about the game required:\n")
+        for problem in result.incoherences:
+            print(f"  {problem.describe()}")
+        print()
+
+    quotes = sorted(result.quotes, key=lambda q: q.ev, reverse=True)
+    playable = [q for q in quotes if q.ev >= args.min_ev]
+
+    if playable:
+        print(f"{'EV':>8} {'ticker':<26} {'bet':<44} {'price':>7} "
+              f"{'fair':>7} {'size':>6}")
+        print("-" * 104)
+        for q in playable[:args.limit]:
+            print(f"{q.ev:>+7.1%} {q.ticker:<26} {q.describe()[:44]:<44} "
+                  f"{q.price * 100:>6.0f}c {q.fair * 100:>6.1f}c "
+                  f"{q.contracts:>6}")
+            for flag in q.flags:
+                print(f"{'':>8}   ! {flag}")
+    else:
+        print(f"No rung clears {args.min_ev:+.1%}.")
+
+    print(f"\n{len(result.games)} game(s) priced, "
+          f"{len(result.quotes)} rung(s) quoted, "
+          f"{len(result.unmatched)} market(s) unmatched.")
+    if result.unmatched and args.show_unmatched:
+        print("\nCould not be joined to a game:")
+        seen = set()
+        for market, match in result.unmatched:
+            if match.reason in seen:
+                continue
+            seen.add(match.reason)
+            print(f"  {market.ticker}: {match.reason}")
+    skipped = [(m, why) for g in result.games for m, why in g.skipped]
+    if skipped and args.show_skipped:
+        print("\nJoined but not priced:")
+        for market, why in skipped[:20]:
+            ticker = getattr(market, "ticker", "-")
+            print(f"  {ticker}: {why}")
+    print(f"({result.credits} credit(s), {result.requests} Kalshi request(s))")
+
+
+def notify_kalshi(cfg, db, quotes, now=None, dry_run=False) -> dict:
+    """Push playable rungs, under the same suppression rules as a scan."""
+    from . import notify as N
+
+    nc = cfg.notify
+    now = now or datetime.now(timezone.utc)
+    stats = {"sent": 0, "suppressed": 0, "quiet": False, "errors": 0}
+    local_now = now.astimezone()
+    if N.in_quiet_hours(local_now, nc.quiet_start, nc.quiet_end):
+        stats["quiet"] = True
+        return stats
+
+    for quote in sorted(quotes, key=lambda q: q.ev, reverse=True)[:nc.max_messages]:
+        fp = N.fingerprint("kalshi", quote.ticker, quote.threshold)
+        wanted, _why = db.should_notify(
+            fp, quote.price, now,
+            resend_after_hours=nc.resend_after_hours,
+            resend_on_price_gain=nc.resend_on_price_gain,
+        )
+        if not wanted:
+            stats["suppressed"] += 1
+            continue
+        message = N.Message(
+            title=f"{quote.ev:+.1%}  {quote.describe()}",
+            body=(f"Kalshi {quote.ticker}\n"
+                  f"buy YES at {quote.price * 100:.0f}c, fair "
+                  f"{quote.fair * 100:.1f}c\n"
+                  f"up to {quote.contracts} contract(s)"),
+            tags=["money_with_wings"],
+        )
+        if dry_run:
+            print(f"  [dry run] {message.title}")
+            stats["sent"] += 1
+            continue
+        try:
+            provider = N.send(message, nc)
+        except Exception as exc:  # noqa: BLE001
+            stats["errors"] += 1
+            db.record_notification(fp, now, ev=quote.ev, price=quote.price,
+                                   title=message.title, ok=False,
+                                   error=str(exc)[:500])
+            continue
+        stats["sent"] += 1
+        db.record_notification(fp, now, provider=provider, ev=quote.ev,
+                               price=quote.price, title=message.title)
+    return stats
+
+
+# ---------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------
 
@@ -2037,6 +2251,37 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--void", type=int, default=0, metavar="N",
                    help="legs that pushed and shrank the entry")
     s.set_defaults(func=cmd_parlay_settle)
+
+    p_kalshi = sub.add_parser(
+        "kalshi", help="price Kalshi ladders against the sharp line"
+    )
+    ksub = p_kalshi.add_subparsers(dest="kalshi_command", required=True)
+
+    s = ksub.add_parser(
+        "scan",
+        help="price every rung Kalshi lists",
+        description="Fit a margin distribution to the sharp book's main "
+                    "line, then price every rung of every Kalshi ladder "
+                    "from it -- including the outer ones no odds feed "
+                    "quotes back.",
+    )
+    s.add_argument("--sports", nargs="+", help="override configured sports")
+    s.add_argument("--series", metavar="TICKER",
+                   help="narrow to one Kalshi series")
+    s.add_argument("--min-ev", type=float, default=0.03,
+                   help="e.g. 0.03 for +3%%")
+    s.add_argument("--limit", type=int, default=15)
+    s.add_argument("--max-books", type=int, default=12, metavar="N",
+                   help="order books to pull per game. One request each, "
+                        "so this is the cost of the run")
+    s.add_argument("--show-unmatched", action="store_true",
+                   help="list the markets that could not be joined")
+    s.add_argument("--show-skipped", action="store_true",
+                   help="list the markets joined but not priced")
+    s.add_argument("--no-notify", action="store_true")
+    s.add_argument("--dry-run-notify", action="store_true")
+    s.add_argument("--base-url", dest="base_url", metavar="URL")
+    s.set_defaults(func=cmd_kalshi_scan)
 
     p_notify = sub.add_parser(
         "notify", help="phone notifications for bets worth placing"

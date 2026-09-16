@@ -45,6 +45,7 @@ position you cannot actually take.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -323,6 +324,50 @@ def _timestamp(value) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def fee(contracts: int, price: float, maker: bool = False,
+        cfg=None) -> float:
+    """
+    Kalshi's trading fee in dollars, rounded up to the next cent.
+
+        fee = ceil_to_cent( multiplier * contracts * price * (1 - price) )
+
+    The rounding is per order and it bites small ones: a single contract
+    at 50c pays 2c where the formula says 1.75c -- 4% of stake rather
+    than 3.5%. On books this thin, small orders are the normal case, so
+    a model using the bare formula would overrate almost everything.
+    """
+    if contracts <= 0:
+        return 0.0
+    if not 0.0 <= price <= 1.0:
+        raise KalshiError("price must be a probability in dollars, 0..1")
+    taker = getattr(cfg, "taker_coefficient", 0.07) if cfg else 0.07
+    maker_c = getattr(cfg, "maker_coefficient", 0.0175) if cfg else 0.0175
+    coefficient = maker_c if maker else taker
+    raw = coefficient * contracts * price * (1.0 - price)
+    return math.ceil(raw * 100.0 - 1e-9) / 100.0
+
+
+def fee_for(contracts: int, price: float, maker: bool, cfg) -> float:
+    """`fee`, with the coefficients a config carries."""
+    return fee(contracts, price, maker, cfg)
+
+
+def breakeven_edge(price: float, maker: bool = False, cfg=None) -> float:
+    """
+    How far the true probability must sit above the price before a
+    position is worth taking, ignoring the cent rounding.
+
+    At a coin flip a taker needs 1.75 cents and a maker 0.44. That
+    four-fold gap is the only structural edge on this exchange that does
+    not require being right about anything, and it is why the same
+    contract can be worth posting for and not worth crossing for.
+    """
+    taker = getattr(cfg, "taker_coefficient", 0.07) if cfg else 0.07
+    maker_c = getattr(cfg, "maker_coefficient", 0.0175) if cfg else 0.0175
+    coefficient = maker_c if maker else taker
+    return coefficient * price * (1.0 - price)
 
 
 # ---------------------------------------------------------------------------
