@@ -823,7 +823,9 @@ def cmd_rt_discover(cfg: Config, args) -> int:
     from . import kalshi, rtdiscover, rtfetch
     from .tomatoes import ContractBook, USER_CONTRACTS_PATH
 
-    client = kalshi.MarketData()
+    client = kalshi.MarketData(
+        base_url=args.base_url or cfg.tomatoes.kalshi_base_url
+    )
 
     def fetcher(slug):
         return rtfetch.fetch(slug, cache_dir=args.cache)
@@ -916,7 +918,9 @@ def cmd_rt_scan(cfg: Config, args) -> int:
         return 0
 
     bankroll = args.bankroll or cfg.bankroll.amount
-    client = kalshi.MarketData()
+    client = kalshi.MarketData(
+        base_url=getattr(args, 'base_url', None) or cfg.tomatoes.kalshi_base_url
+    )
     rows = []
 
     for contract in book.contracts:
@@ -2120,6 +2124,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true",
                    help="include closed and settled markets")
     s.add_argument("--cache", metavar="DIR", help="where to cache RT pages")
+    s.add_argument("--base-url", dest="base_url", metavar="URL",
+                   help="Kalshi API base. They have moved it before, "
+                        "so it is not baked in")
     s.set_defaults(func=cmd_rt_discover)
 
     s = rtsub.add_parser("snapshot", help="read a film's Tomatometer now")
@@ -2139,6 +2146,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip Kalshi and use this price, 0..1, for every "
                         "contract. For checking the maths by hand")
     s.add_argument("--cache", metavar="DIR", help="where to cache pages")
+    s.add_argument("--base-url", dest="base_url", metavar="URL",
+                   help="Kalshi API base. They have moved it before, "
+                        "so it is not baked in")
     s.set_defaults(func=cmd_rt_scan)
 
     s = sub.add_parser(

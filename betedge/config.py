@@ -348,6 +348,11 @@ class TomatoesConfig:
     # taker fee is four times the maker fee, so assuming the cheap one
     # would flatter every position the tool prints.
     assume_maker: bool = False
+    # Kalshi's API host. Configurable because they have moved it before --
+    # api.elections.kalshi.com dates from the elections era, and a stale
+    # record pointing somewhere with a mismatched certificate looks
+    # exactly like a broken trust store from the client side.
+    kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 @dataclass

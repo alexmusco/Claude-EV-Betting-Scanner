@@ -58,6 +58,50 @@ class KalshiError(RuntimeError):
     """The exchange returned something this client cannot use."""
 
 
+CERTIFICATE_HELP = """could not verify the TLS certificate.
+
+This is your machine's certificate store, not Kalshi. Note that if other
+hosts (the odds API) work from the same environment, Python HAS a bundle
+-- it is just missing or has outdated the root this host chains to. The
+usual cause is a server that does not send its full intermediate chain:
+curl fetches the missing link and Python does not.
+
+In order:
+
+    pip install --upgrade certifi
+
+then, if it still fails and you installed Python from python.org:
+
+    /Applications/Python\ 3.x/Install\ Certificates.command
+
+To see which of the two it is:
+
+    curl -sS -o /dev/null -w '%{http_code}\n' <the url above>
+
+curl succeeding where Python fails means the chain, not the store.
+
+Do NOT disable verification to get past this. An unverified connection
+to a trading venue is worth less than no connection to one."""
+
+
+def _explain_ssl(exc: Exception, url: str) -> Exception:
+    """Turn an opaque TLS failure into something actionable."""
+    return KalshiError(f"{url}: {CERTIFICATE_HELP}\n\n(underlying error: {exc})")
+
+
+def _is_certificate_error(exc: Exception) -> bool:
+    """
+    Whether a failure is a TLS trust problem.
+
+    Matched on the message rather than the type so that this works
+    whether the caller is using requests, urllib or a stub -- the point
+    is to say something useful, and being wrong costs only a slightly
+    off error message.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "certificate" in text or "sslcertverification" in text
+
+
 def _cents_to_probability(value) -> float | None:
     if value in (None, ""):
         return None
@@ -304,13 +348,19 @@ class MarketData:
 
             getter = requests.get
         self.requests_made += 1
-        response = getter(
-            f"{self.base_url}{path}",
-            params=params or {},
-            headers={"Accept": "application/json",
-                     "User-Agent": "betedge/1.0 (read-only market data)"},
-            timeout=self.timeout,
-        )
+        url = f"{self.base_url}{path}"
+        try:
+            response = getter(
+                url,
+                params=params or {},
+                headers={"Accept": "application/json",
+                         "User-Agent": "betedge/1.0 (read-only market data)"},
+                timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_certificate_error(exc):
+                raise _explain_ssl(exc, url) from exc
+            raise
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):

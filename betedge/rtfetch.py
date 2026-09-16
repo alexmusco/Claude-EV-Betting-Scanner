@@ -253,20 +253,28 @@ def fetch(
         html = cached.read_text(encoding="utf-8", errors="replace")
 
     if html is None:
+        from .kalshi import _explain_ssl, _is_certificate_error
+
         getter = session.get if session is not None else requests.get
-        response = getter(
-            f"{BASE_URL}{path}",
-            headers={
-                # Identifiable rather than disguised, and honest about
-                # what this is. robots.txt permits /m/<slug>.
-                "User-Agent": (
-                    "betedge/1.0 (personal contract pricing; "
-                    "respects robots.txt)"
-                ),
-                "Accept": "text/html",
-            },
-            timeout=timeout,
-        )
+        url = f"{BASE_URL}{path}"
+        try:
+            response = getter(
+                url,
+                headers={
+                    # Identifiable rather than disguised, and honest about
+                    # what this is. robots.txt permits /m/<slug>.
+                    "User-Agent": (
+                        "betedge/1.0 (personal contract pricing; "
+                        "respects robots.txt)"
+                    ),
+                    "Accept": "text/html",
+                },
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_certificate_error(exc):
+                raise _explain_ssl(exc, url) from exc
+            raise
         response.raise_for_status()
         html = response.text
         cached.write_text(html, encoding="utf-8")
