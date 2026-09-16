@@ -503,3 +503,36 @@ class TestCompareCommand:
         assert "Which strategy is working" in html
         assert "ROI 90% interval" in html
         assert "Realised / modelled" in html
+
+
+class TestEventIdWarning:
+    """
+    The warning is about losing closing-line value, which can only be lost
+    on a bet whose event has not closed yet.
+    """
+
+    def test_a_settled_bet_is_not_warned_about(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        cli.main(["--config", str(cfg_path), "bet", "--stake", "10",
+                  "--price", "1.91", "--book", "draftkings", "--settle", "lost",
+                  "--selection", "Max Fried", "--side", "Under", "--line", "4.5"])
+        out = capsys.readouterr().out
+        assert "settled lost" in out
+        assert "no event id" not in out
+
+    def test_a_pending_bet_still_is(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        cli.main(["--config", str(cfg_path), "bet", "--stake", "10",
+                  "--price", "1.91", "--book", "draftkings",
+                  "--selection", "Max Fried", "--side", "Under", "--line", "4.5"])
+        out = capsys.readouterr().out
+        assert "no event id" in out
+        assert "betedge bet <id>" in out
+
+    def test_a_pending_bet_with_an_event_id_is_not_warned_about(self, wired, capsys):
+        cfg_path, _client, _tmp = wired
+        cli.main(["--config", str(cfg_path), "bet", "--stake", "10",
+                  "--price", "1.91", "--book", "draftkings",
+                  "--event-id", "evt1",
+                  "--selection", "Max Fried", "--side", "Under", "--line", "4.5"])
+        assert "no event id" not in capsys.readouterr().out

@@ -576,9 +576,15 @@ def cmd_bet(cfg: Config, args) -> int:
     )
     if bet["status"] != "pending":
         print(f"  settled {bet['status']}: {bet['pnl']:+,.2f}")
-    if not bet["event_id"]:
+    if not bet["event_id"] and bet["status"] == "pending":
+        # Only worth saying while a closing line could still be captured.
+        # A settled bet is past every close there was, so warning about it
+        # is noise on exactly the rows where nothing can be done -- and a
+        # warning that fires when nothing is wrong teaches you to skip the
+        # ones that matter.
         print("  no event id — `betedge close` won't be able to capture a "
-              "closing line for this one.")
+              "closing line for this one. Log bets against a flagged "
+              "opportunity (`betedge bet <id>`) and it is filled in for you.")
     db.close()
     return 0
 
