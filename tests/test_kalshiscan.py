@@ -83,14 +83,21 @@ class TestGameLines:
         assert line.overround > 0
 
     def test_a_de_vigged_fit_gives_a_wider_game_than_a_raw_one(self):
-        priors = L.PriorSet.load()
-        (line,) = KS.game_lines([odds_event()])
+        """
+        Exercised on a sport with no MEASURED sigma, because the NFL no
+        longer fits sigma at all -- measuring it showed the fit was
+        biased low. The reasoning still holds wherever the fit is used:
+        the vig inflates the favourite, which shrinks sigma, which
+        understates the outer rungs.
+        """
         from betedge import pricing
 
+        priors = L.PriorSet.load()
+        (line,) = KS.game_lines([odds_event()])
         fitted = L.fit(line.spread, line.fair_win_prob,
-                       "americanfootball_nfl", priors)
+                       "basketball_nba", priors)
         naive = L.fit(line.spread, pricing.implied(1.43),
-                      "americanfootball_nfl", priors)
+                      "basketball_nba", priors)
         assert fitted.sigma > naive.sigma
 
     def test_the_favourite_comes_from_the_spread(self):
@@ -253,11 +260,17 @@ class TestPriceRungs:
         assert abs(quote.edge) < 0.01
 
     def test_the_model_flags_ride_along_on_every_quote(self, setup):
-        cfg, line, model = setup
+        # Whatever the model has to say about itself must reach the
+        # quote, or a caveat dies between the fit and the decision.
+        cfg, line, _model = setup
+        model = L.fit(line.spread, 0.95, "americanfootball_nfl",
+                      L.PriorSet.load())
+        assert model.flags
         markets = [FakeMarket("T", "Chiefs to beat the Broncos by more than 3.5")]
         books = {"T": book(no_bids=[[60, 200]])}
         (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
-        assert "margin_priors_unverified" in quote.flags
+        for flag in model.flags:
+            assert flag in quote.flags
 
 
 class TestMakerFees:

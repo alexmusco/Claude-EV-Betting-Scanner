@@ -120,6 +120,11 @@ class SportPrior:
     sigma_typical: float
     sigma_low: float
     sigma_high: float
+    #: Sigma MEASURED from finished games -- the standard deviation of
+    #: (margin minus closing spread). When present this is what prices
+    #: the ladder, because fitting sigma per game from a moneyline is
+    #: biased: see calibrate.py.
+    sigma_measured: float | None = None
     total_sigma: float = 0.0
     #: Extra probability mass sitting exactly on these margins, as a
     #: fraction. Priors, not measurements -- see the YAML.
@@ -153,6 +158,10 @@ class PriorSet:
         for key, spec in (raw.get("sports") or {}).items():
             sports[key] = SportPrior(
                 key=key,
+                sigma_measured=(
+                    float(spec["sigma_measured"])
+                    if spec.get("sigma_measured") is not None else None
+                ),
                 sigma_typical=float(spec["sigma_typical"]),
                 sigma_low=float(spec["sigma_low"]),
                 sigma_high=float(spec["sigma_high"]),
@@ -275,6 +284,54 @@ def fit(
     prior = priors.get(sport) if priors else None
     flags: list[str] = []
     mu = float(spread)
+
+    # A MEASURED sigma wins, and the moneyline becomes a check on it.
+    #
+    # This inverts the module's original design, on the evidence. Solving
+    # sigma per game from the spread and the moneyline is elegant and it
+    # is biased: over 6,983 NFL games the implied sigma lands near 11.3
+    # to 11.6 under every de-vig method, while the realised spread of
+    # (margin minus closing spread) is 13.19. Margins are not normal --
+    # fifteen percent of games land on exactly three points -- so the
+    # sigma that best reproduces a moneyline is not the sigma that
+    # describes how far outcomes actually land from the line.
+    #
+    # It matters in the worst direction: too small a sigma UNDERSTATES
+    # the outer rungs, which is precisely where this scan looks, so the
+    # error would have been invisible and would have quietly suppressed
+    # the tool's own findings.
+    if win_probability is not None and not 0.0 < win_probability < 1.0:
+        # Checked before either branch. A certainty is not a probability,
+        # and letting it through on the measured path only because sigma
+        # no longer depends on it would accept an input that means
+        # something has already gone wrong upstream.
+        raise LadderError("win probability must be strictly between 0 and 1")
+
+    if prior is not None and prior.sigma_measured:
+        sigma = prior.sigma_measured
+        source = "measured"
+        if win_probability is not None and abs(mu) > 1e-9:
+            z = norm_ppf(win_probability)
+            if z > 0.01:
+                implied = mu / z
+                if abs(implied - sigma) / sigma > 0.25:
+                    # Not "the moneyline is right" -- it is a disagreement,
+                    # and on this scale it usually means a stale price or
+                    # a mismatched event rather than an unusual game.
+                    flags.append(
+                        f"moneyline_implies_sigma_{implied:.1f}_vs_measured_"
+                        f"{sigma:.1f}"
+                    )
+            elif win_probability < 0.5:
+                raise LadderError(
+                    f"spread {spread:+g} and win probability "
+                    f"{win_probability:.1%} disagree about who is favoured. "
+                    "Check that both are for the same side of the same game."
+                )
+        if prior and not prior.verified:
+            flags.append("margin_priors_unverified")
+        return MarginModel(mu=mu, sigma=sigma, sport=sport,
+                           sigma_source=source, prior=prior, flags=flags)
 
     if win_probability is None:
         if prior is None:

@@ -22,8 +22,19 @@ def priors():
 
 @pytest.fixture
 def nfl(priors):
-    # A 6.5-point favourite that the moneyline makes a 70% winner.
+    """A 6.5-point favourite. NFL sigma is MEASURED, so it is not fitted."""
     return L.fit(6.5, 0.70, "americanfootball_nfl", priors)
+
+
+#: A sport with no measured sigma, so the per-game FIT is exercised.
+#: NFL cannot test it any more: measuring it showed the fit was biased
+#: low by about 12%, so the measurement takes priority there.
+UNMEASURED = "basketball_nba"
+
+
+@pytest.fixture
+def fitted(priors):
+    return L.fit(6.5, 0.70, UNMEASURED, priors)
 
 
 # --------------------------------------------------------------------------
@@ -55,35 +66,74 @@ class TestNormal:
 # --------------------------------------------------------------------------
 
 
+class TestMeasuredBeatsFitted:
+    """
+    Measuring the NFL inverted this module's original design.
+
+    Solving sigma per game from the spread and the moneyline is elegant
+    and it is biased: over 6,983 games the implied sigma lands near 11.6
+    while the realised spread of (margin minus closing spread) is 13.19.
+    Too small a sigma understates the OUTER rungs -- exactly where this
+    scan looks -- so the error was invisible and suppressed the tool's
+    own findings.
+    """
+
+    def test_a_measured_sigma_is_used_in_preference_to_the_fit(self, nfl, priors):
+        assert nfl.sigma_source == "measured"
+        assert nfl.sigma == priors.get("americanfootball_nfl").sigma_measured
+
+    def test_the_moneyline_no_longer_moves_it(self, priors):
+        a = L.fit(6.5, 0.62, "americanfootball_nfl", priors)
+        b = L.fit(6.5, 0.78, "americanfootball_nfl", priors)
+        assert a.sigma == b.sigma
+
+    def test_a_wild_disagreement_is_flagged(self, priors):
+        # Not "the moneyline is right": on this scale it usually means a
+        # stale price or a mismatched event.
+        model = L.fit(6.5, 0.95, "americanfootball_nfl", priors)
+        assert any("moneyline_implies_sigma" in f for f in model.flags)
+
+    def test_an_ordinary_moneyline_is_not_flagged(self, nfl):
+        assert not any("moneyline_implies" in f for f in nfl.flags)
+
+    def test_the_measured_sigma_is_wider_than_the_fit_would_have_given(
+        self, priors
+    ):
+        # The bias, in one line: the old design would have priced this
+        # ladder from a narrower distribution.
+        measured = L.fit(6.5, 0.70, "americanfootball_nfl", priors)
+        fitted = L.fit(6.5, 0.70, UNMEASURED, priors)
+        assert measured.sigma > fitted.sigma
+
+
 class TestFit:
-    def test_it_reproduces_the_moneyline_it_was_fitted_to(self, nfl):
-        # The closed loop. Sigma is solved so that P(margin > 0) comes
-        # out at the moneyline; if it does not, the algebra is wrong and
-        # every rung on the ladder inherits the error.
-        assert nfl.implied_win_prob == pytest.approx(0.70, abs=1e-9)
+    def test_it_reproduces_the_moneyline_it_was_fitted_to(self, fitted):
+        # The closed loop, on a sport with nothing measured. Sigma is
+        # solved so that P(margin > 0) comes out at the moneyline; if it
+        # does not, the algebra is wrong.
+        assert fitted.implied_win_prob == pytest.approx(0.70, abs=1e-9)
 
     @pytest.mark.parametrize("spread,prob", [
         (3.0, 0.58), (6.5, 0.70), (10.0, 0.78), (1.5, 0.53), (14.0, 0.85),
     ])
     def test_the_loop_closes_across_the_board(self, priors, spread, prob):
-        model = L.fit(spread, prob, "americanfootball_nfl", priors)
+        model = L.fit(spread, prob, UNMEASURED, priors)
         assert model.implied_win_prob == pytest.approx(prob, abs=1e-9)
 
-    def test_sigma_is_solved_not_assumed(self, nfl, priors):
+    def test_sigma_is_solved_not_assumed(self, fitted, priors):
         # sigma = mu / z, and for a 70% winner z is about 0.5244.
-        assert nfl.sigma == pytest.approx(6.5 / L.norm_ppf(0.70), abs=1e-9)
-        assert nfl.sigma != priors.get("americanfootball_nfl").sigma_typical
-        assert nfl.sigma_source == "fitted"
+        assert fitted.sigma == pytest.approx(6.5 / L.norm_ppf(0.70), abs=1e-9)
+        assert fitted.sigma_source == "fitted"
 
     def test_a_bigger_favourite_at_the_same_price_means_a_wider_game(
         self, priors
     ):
-        narrow = L.fit(3.0, 0.70, "americanfootball_nfl", priors)
-        wide = L.fit(10.0, 0.70, "americanfootball_nfl", priors)
+        narrow = L.fit(3.0, 0.70, UNMEASURED, priors)
+        wide = L.fit(10.0, 0.70, UNMEASURED, priors)
         assert wide.sigma > narrow.sigma
 
     def test_without_a_moneyline_it_falls_back_and_says_so(self, priors):
-        model = L.fit(6.5, None, "americanfootball_nfl", priors)
+        model = L.fit(6.5, None, UNMEASURED, priors)
         assert model.sigma_source == "sport prior"
         assert "sigma_from_prior_not_fitted_to_this_game" in model.flags
 
@@ -96,7 +146,7 @@ class TestFit:
     def test_a_pick_em_cannot_identify_sigma(self, priors):
         # Every sigma reproduces a 50% moneyline, so there is nothing to
         # solve and the fallback must be flagged rather than silent.
-        model = L.fit(0.0, 0.50, "americanfootball_nfl", priors)
+        model = L.fit(0.0, 0.50, UNMEASURED, priors)
         assert "pick_em_so_sigma_is_not_identified" in model.flags
         assert model.sigma_source == "sport prior"
 
@@ -105,25 +155,28 @@ class TestFit:
         # off the wrong side. Fitting it would produce a negative sigma
         # and price the whole ladder backwards.
         with pytest.raises(L.LadderError, match="disagree about who is favoured"):
-            L.fit(6.5, 0.35, "americanfootball_nfl", priors)
+            L.fit(6.5, 0.35, UNMEASURED, priors)
 
     def test_an_impossible_probability_is_refused(self, priors):
         with pytest.raises(L.LadderError, match="strictly between"):
-            L.fit(6.5, 1.0, "americanfootball_nfl", priors)
+            L.fit(6.5, 1.0, UNMEASURED, priors)
 
     def test_an_implausible_sigma_is_flagged_not_rejected(self, priors):
         # A 14-point favourite at 52% implies an absurdly wide game. The
         # inputs disagree; the fit still returns, with the disagreement
         # attached.
-        model = L.fit(14.0, 0.52, "americanfootball_nfl", priors)
-        assert any("outside_americanfootball_nfl_range" in f
+        model = L.fit(14.0, 0.52, UNMEASURED, priors)
+        assert any("outside_" + UNMEASURED + "_range" in f
                    for f in model.flags)
 
-    def test_an_ordinary_game_is_not_flagged(self, nfl):
-        assert not any("outside" in f for f in nfl.flags)
+    def test_an_ordinary_game_is_not_flagged(self, fitted):
+        assert not any("outside" in f for f in fitted.flags)
 
-    def test_unverified_priors_ride_along_on_every_model(self, nfl):
-        assert "margin_priors_unverified" in nfl.flags
+    def test_unverified_priors_ride_along_on_every_model(self, fitted):
+        assert "margin_priors_unverified" in fitted.flags
+
+    def test_a_measured_sport_carries_no_such_flag(self, nfl):
+        assert "margin_priors_unverified" not in nfl.flags
 
 
 # --------------------------------------------------------------------------
@@ -144,8 +197,13 @@ class TestRungPricing:
             assert 0.0 <= nfl.prob_margin_over(threshold) <= 1.0
 
     def test_the_spread_itself_is_near_a_coin_flip(self, nfl):
-        # By construction: the spread is the middle of the distribution.
-        assert nfl.prob_margin_over(6.5) == pytest.approx(0.5, abs=0.02)
+        """
+        The spread is the middle of the distribution, so a rung sitting
+        on it is close to even money. Not exactly: the NFL key numbers
+        are lumpy and asymmetric around 6.5, and the tolerance is wide
+        enough to allow that without allowing a real error.
+        """
+        assert nfl.prob_margin_over(6.5) == pytest.approx(0.5, abs=0.06)
 
     def test_a_negative_threshold_asks_about_the_underdog(self, nfl):
         # The same distribution read further left, which is the point of
@@ -312,10 +370,14 @@ class TestPriceLadder:
 
 
 class TestShippedPriors:
-    def test_every_sport_ships_unverified(self, priors):
-        # They are recollection, not a fit, and the flag rides along on
-        # every model built from them.
-        assert set(priors.unverified) == set(priors.sports)
+    def test_the_nfl_is_measured_and_the_rest_are_not(self, priors):
+        # NFL was fitted to 6,983 games via nflverse. The other three are
+        # still recollection, and the flag rides along on every model
+        # built from them.
+        assert "americanfootball_nfl" not in priors.unverified
+        assert set(priors.unverified) == {
+            "basketball_nba", "baseball_mlb", "icehockey_nhl"
+        }
 
     def test_the_bands_are_ordered_and_contain_the_typical(self, priors):
         for key, prior in priors.sports.items():
@@ -327,10 +389,18 @@ class TestShippedPriors:
             span = prior.sigma_high - prior.sigma_low
             assert span > 0.5 * prior.sigma_typical, key
 
-    def test_key_number_mass_is_a_sane_fraction(self, priors):
+    def test_no_key_number_bump_is_absurd(self, priors):
+        """
+        Bumps are MULTIPLICATIVE, so +1.8 means "about three times as
+        often as a smooth fit predicts" -- which is really what happens
+        at three points. The bound that matters is the lower one: a bump
+        at or below -1 would make a margin impossible, and nothing in
+        football is.
+        """
         for key, prior in priors.sports.items():
-            total = sum(prior.key_numbers.values())
-            assert total < 0.5, f"{key} claims {total:.0%} on key numbers"
+            for margin, bump in prior.key_numbers.items():
+                assert bump > -1.0, f"{key} makes margin {margin:g} impossible"
+                assert bump < 5.0, f"{key} claims {bump:+.0%} at {margin:g}"
 
     def test_the_four_sports_this_tool_bets_are_present(self, priors):
         for key in ("americanfootball_nfl", "basketball_nba",

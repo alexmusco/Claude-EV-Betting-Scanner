@@ -867,6 +867,60 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_kalshi_calibrate(cfg: Config, args) -> int:
+    """
+    Measure the margin model against finished games.
+
+    nflverse publishes every NFL game since 1999 with its final score AND
+    the closing line, which is what makes the model checkable rather than
+    merely fittable. Public data, no key.
+    """
+    from . import calibrate as C
+
+    path = Path(args.source) if args.source else (
+        Path(cfg.reports_dir).parent / "data" / "nfl_games.csv"
+    )
+    if args.refresh or not path.exists():
+        print(f"Fetching {C.NFLVERSE_GAMES_URL} ...")
+        try:
+            path = C.download_games(path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not fetch it: {exc}")
+            if not path.exists():
+                return 1
+            print(f"Using the copy already at {path}.")
+    print(f"Reading {path}\n")
+
+    try:
+        games = C.read_nflverse_games(path)
+        result = C.calibrate(games, sport=args.sport)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not calibrate: {exc}")
+        return 1
+
+    print(result.describe())
+    print()
+    if result.sigma_by_spread:
+        print("Sigma within each spread band -- if these are flat, sigma "
+              "does NOT scale\nwith the spread, and fitting it per game "
+              "is the wrong shape:")
+        for band, sigma in result.sigma_by_spread.items():
+            print(f"  |spread| {band:<8} {sigma:.2f}")
+        print()
+    if result.implied_disagrees:
+        print("The moneylines imply a different sigma from the one games "
+              "actually produce.\nThe measurement wins: a normal cannot "
+              "represent a distribution where fifteen\npercent of games "
+              "land on exactly three points, so the sigma that best\n"
+              "reproduces a moneyline is not the one describing how far "
+              "results land\nfrom the line. See calibrate.py.\n")
+
+    print("Paste this into betedge/data/margin_priors.yaml (or your own "
+          "copy):\n")
+    print(C.to_yaml_block(result, today=datetime.now().strftime("%Y-%m-%d")))
+    return 0
+
+
 def _print_kalshi(result, cfg, args) -> None:
     from . import report as R
 
@@ -2282,6 +2336,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dry-run-notify", action="store_true")
     s.add_argument("--base-url", dest="base_url", metavar="URL")
     s.set_defaults(func=cmd_kalshi_scan)
+
+    s = ksub.add_parser(
+        "calibrate",
+        help="measure the margin model against finished games",
+        description="Fit sigma and the key numbers from nflverse's game "
+                    "file, which carries every NFL result since 1999 "
+                    "alongside the line it closed at.",
+    )
+    s.add_argument("--source", metavar="CSV",
+                   help="a games.csv already on disk")
+    s.add_argument("--refresh", action="store_true",
+                   help="re-download it from nflverse")
+    s.add_argument("--sport", default="americanfootball_nfl")
+    s.set_defaults(func=cmd_kalshi_calibrate)
 
     p_notify = sub.add_parser(
         "notify", help="phone notifications for bets worth placing"

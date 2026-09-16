@@ -1095,6 +1095,7 @@ entry point is never created.
 | `bet delete <id> ...` | free | Remove bets from the ledger — a bet you never placed distorts every ratio in `bet compare` |
 | `bet close` | ~1/event | Capture closing lines |
 | `bet report` | free | Performance and CLV |
+| `bet kalshi calibrate` | free | Measure the margin model against every NFL result since 1999 (nflverse) |
 | `bet kalshi scan` | ~1/sport | Price every Kalshi rung against the sharp line, including the outer ones no feed quotes |
 | `bet notify test` | free | Send one message, to prove the phone end of the chain works |
 | `bet notify log` | free | What has been pushed, and what failed |

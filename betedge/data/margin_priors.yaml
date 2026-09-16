@@ -6,18 +6,30 @@
 #
 # READ THIS BEFORE TRUSTING A LADDER PRICE.
 #
-# These are PRIORS, not measurements. They are written from recollection
-# of well-known distributional facts, and they have NOT been fitted to a
-# dataset. Everything here ships `verified: false`, and the flag rides
-# along on every model built from it.
+# NFL is MEASURED, from 6,983 regular-season games 1999-2026 via
+# nflverse. The other three sports are still recollection and ship
+# `verified: false`, with the flag riding along on every model built
+# from them.
+#
+# Measuring the NFL changed two things and one of them inverted a design
+# decision -- see calibrate.py. In short: sigma is NOT fitted per game
+# from the moneyline any more. That was biased low by about 12%, in the
+# direction that quietly understates the outer rungs this scan exists to
+# find.
+#
+#     betedge kalshi calibrate --refresh      re-measure from nflverse
 #
 # ---------------------------------------------------------------------------
 # WHAT EACH FIELD IS FOR
 #
-# sigma_typical   Used ONLY when a moneyline is unavailable, or when the
-#                 game is a pick'em and sigma is therefore unidentified.
-#                 Normally sigma is SOLVED from the spread and the
-#                 de-vigged moneyline together, not taken from here.
+# sigma_measured  The standard deviation of (final margin minus closing
+#                 spread), measured over finished games. When present,
+#                 THIS is what prices the ladder, and the moneyline
+#                 becomes a consistency check rather than the source.
+#
+# sigma_typical   The fallback when nothing has been measured. Sigma is
+#                 then solved from the spread and the de-vigged moneyline
+#                 -- which works, and is biased, so prefer measuring.
 #
 # sigma_low       A plausibility band, not an estimate. Its job is to
 # sigma_high      catch inputs that disagree with each other -- a stale
@@ -59,28 +71,41 @@ sports:
   # much more than any other half-point on the board.
   # -----------------------------------------------------------------------
   americanfootball_nfl:
-    sigma_typical: 13.5
-    sigma_low: 9.0
-    sigma_high: 18.0
-    total_sigma: 10.5
-    verified: false
+    # MEASURED from 6,983 regular-season games, 1999-2026.
+    # Source: nflverse/nfldata data/games.csv. Regenerate with
+    #   betedge kalshi calibrate --refresh
+    sigma_measured: 13.189
+    sigma_typical: 13.189
+    sigma_low: 8.6
+    sigma_high: 17.8
+    verified: true
+    measured_on: "2026-09-16"
+    # The moneylines imply 11.63, which is NOT the same -- see calibrate.py.
     key_numbers:
-      3: 0.09
-      7: 0.055
-      10: 0.035
-      14: 0.025
-      6: 0.030
-      4: 0.025
-    note: >-
-      Recollection of the standard picture, NOT fitted. The 3 and 7 lumps
-      are the well-attested ones; the rest are smaller and less certain.
-      Verify against a few seasons of final scores before staking on a
-      rung that sits on one.
+      3: 1.815
+      5: -0.305
+      7: 0.873
+      9: -0.641
+      10: 0.295
+      11: -0.442
+      12: -0.581
+      13: -0.252
+      14: 0.389
+      15: -0.53
+      16: -0.295
+      17: 0.256
+      19: -0.507
+      21: 0.378
+      22: -0.417
+      23: -0.298
+      24: 0.535
+      26: -0.278
+      27: 0.29
+      28: 0.94
+      29: -0.274
+      30: -0.316
+      31: 0.972
 
-  # -----------------------------------------------------------------------
-  # NBA. Much smoother -- scoring is near-continuous, so margins have no
-  # meaningful lumps and a normal is a reasonable shape.
-  # -----------------------------------------------------------------------
   basketball_nba:
     sigma_typical: 11.5
     sigma_low: 8.0
