@@ -348,16 +348,18 @@ def collect_markets(client, series_ticker=None, status="open", max_pages=25):
 
 
 def grep_titles(client, text: str, status: str | None = "open",
-                max_pages: int = 25):
+                max_pages: int = 25) -> "Sweep":
     """
     Every market whose title mentions `text`, with its series ticker.
 
-    For finding where on the exchange a kind of market lives. "Found
-    nothing" is a far better answer when you can go looking yourself
-    rather than being told to check the app.
+    For finding where on the exchange a kind of market lives. Returns a
+    Sweep rather than a bare list so that "found nothing" comes with how
+    much was read -- the same distinction discover() reports, and it
+    matters more here, because this is the command someone runs when
+    they already suspect the thing is missing.
     """
     wanted = (text or "").lower()
-    markets, _events, _source, _truncated = collect_markets(
+    markets, events_seen, source, truncated = collect_markets(
         client, status=status, max_pages=max_pages
     )
     hits = set()
@@ -366,7 +368,10 @@ def grep_titles(client, text: str, status: str | None = "open",
         if wanted in blob:
             series = market.ticker.split("-")[0] if market.ticker else ""
             hits.add((series, market.ticker, market.title[:70]))
-    return sorted(hits)
+    sweep = Sweep(markets_seen=len(markets), events_seen=events_seen,
+                  source=source, truncated=truncated)
+    sweep.proposals = sorted(hits)
+    return sweep
 
 
 def discover(
@@ -433,28 +438,6 @@ def discover(
         ))
     sweep.proposals = proposals
     return sweep
-
-
-def grep_titles(client, text: str, status: str | None = "open",
-                max_pages: int = 25) -> list[tuple[str, str, str]]:
-    """
-    Every market whose title mentions `text`, with its series.
-
-    For finding where on the exchange a kind of market lives. "Nothing
-    found" is a far better answer when you can go looking yourself rather
-    than being told to go check the app.
-    """
-    wanted = (text or "").lower()
-    markets, _seen, _source, _truncated = collect_markets(
-        client, status=status, max_pages=max_pages
-    )
-    hits = []
-    for market in markets:
-        blob = f"{market.title} {market.subtitle} {market.ticker}".lower()
-        if wanted in blob:
-            series = market.ticker.split("-")[0] if market.ticker else ""
-            hits.append((series, market.ticker, market.title))
-    return sorted(set(hits))
 
 
 _TRAILING_QUESTION = re.compile(

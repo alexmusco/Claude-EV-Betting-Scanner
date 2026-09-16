@@ -445,11 +445,28 @@ class TestGrep:
         ])])
         assert D.grep_titles(client, "tomato")
 
-    def test_no_match_is_an_empty_list_not_an_error(self):
+    def test_no_match_is_empty_not_an_error(self):
         client = EventClient([event("Fed", [
             {"ticker": "FED-1", "subtitle": "Cut", "status": "active"}
         ])])
-        assert D.grep_titles(client, "tomato") == []
+        assert len(D.grep_titles(client, "tomato")) == 0
+
+    def test_it_reports_how_much_it_read(self):
+        # "Nothing matches" and "nothing matches in the part I read" are
+        # different claims, and this is the command someone runs when they
+        # already suspect the thing is missing.
+        client = EventClient([event("Fed", [
+            {"ticker": "FED-1", "subtitle": "Cut", "status": "active"}
+        ])])
+        sweep = D.grep_titles(client, "tomato")
+        assert sweep.markets_seen == 1
+        assert sweep.events_seen == 1
+        assert sweep.truncated is False
+
+    def test_a_truncated_grep_says_so(self):
+        events = [event(f"E{i}", []) for i in range(400)]
+        sweep = D.grep_titles(EventClient(events), "tomato", max_pages=2)
+        assert sweep.truncated is True
 
 
 class TestFallbackDiscipline:

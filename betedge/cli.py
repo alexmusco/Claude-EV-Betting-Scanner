@@ -840,15 +840,24 @@ def cmd_rt_discover(cfg: Config, args) -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"Could not reach Kalshi: {exc}")
             return 1
+        scanned = (f"Scanned {hits.markets_seen:,} market(s)"
+                   + (f" across {hits.events_seen:,} event(s)"
+                      if hits.events_seen else "")
+                   + f" via the {hits.source} endpoint.")
         if not hits:
-            print(f"Nothing on the exchange mentions {args.grep!r}.")
-            print(f"({client.requests_made} request(s) made.)")
+            print(f"Nothing in what was scanned mentions {args.grep!r}.\n")
+            print(scanned)
+            if hits.truncated:
+                print("That hit the paging cap, so it is NOT the whole "
+                      "exchange -- this does not establish that nothing "
+                      "matches.")
+            print(f"\n({client.requests_made} request(s) made.)")
             return 0
-        print(f"{len(hits)} market(s) mentioning {args.grep!r}:\n")
+        print(f"{len(hits)} market(s) mentioning {args.grep!r}. {scanned}\n")
         print(f"{'series':<16} {'ticker':<34} title")
-        for series, ticker, title in hits[:60]:
+        for series, ticker, title in list(hits)[:60]:
             print(f"{series:<16} {ticker:<34} {title}")
-        series_seen = sorted({h[0] for h in hits if h[0]})
+        series_seen = sorted({h[0] for h in list(hits) if h[0]})
         if series_seen:
             print(f"\nSeries: {', '.join(series_seen)}")
             print(f"Try:  betedge rt discover --series {series_seen[0]}")
