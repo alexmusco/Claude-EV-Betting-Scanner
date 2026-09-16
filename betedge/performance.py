@@ -68,6 +68,9 @@ class StrategyResult:
     """One strategy's settled record, on the same metrics as the other."""
 
     name: str
+    #: What sourced these bets. A bet the scanner never surfaced is not
+    #: evidence about the scanner, however it turned out.
+    source: str = "model"
     settled: int = 0
     pending: int = 0
     staked: float = 0.0
@@ -166,6 +169,7 @@ def summarise(
     settled_rows: Sequence,
     pending_rows: Sequence = (),
     clv_values: Sequence[float] = (),
+    source: str = "model",
 ) -> StrategyResult:
     """
     Build one strategy's record from its settled bets.
@@ -174,7 +178,7 @@ def summarise(
     zero stake is skipped rather than dividing by it. Works on sqlite3
     rows or plain dicts, so the arithmetic is testable without a database.
     """
-    result = StrategyResult(name=name)
+    result = StrategyResult(name=name, source=source)
     modelled = 0.0
     have_modelled = False
 

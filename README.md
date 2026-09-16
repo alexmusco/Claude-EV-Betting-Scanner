@@ -468,7 +468,11 @@ the t-stat.
 
 The two strategies are tracked in separate tables and always have been —
 single bets in `bets`, multi-leg entries in `parlay_bets` — so nothing is
-pooled. `betedge compare` puts them on identical metrics:
+pooled. A bet the scanner never surfaced (no `opportunity_id`, which is
+every bet logged by hand) is a third column, **your own picks**: a pick you
+made yourself is not evidence about the model however it turned out, and
+pooling them would make the comparison measure neither. `betedge compare`
+puts them all on identical metrics:
 
 ```
                                     single bets           multi-leg

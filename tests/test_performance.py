@@ -196,14 +196,39 @@ class TestComparison:
         assert thin.intervals_overlap is None
 
 
+def seed_opportunity(db, opp_id=1):
+    """
+    A flagged opportunity, so bets placed against it count as the model's.
+
+    A bet with no opportunity_id was never surfaced by a scan, and the
+    comparison treats it as the user's own pick rather than the model's --
+    so a test about the model has to give its bets something to point at.
+    """
+    db.conn.execute(
+        """INSERT INTO opportunities (id, scan_id, scanned_at, sport, event_id,
+               commence_time, market, selection, line, side, sharp_book,
+               sharp_price_taken_side, sharp_price_other_side, sharp_overround,
+               fair_prob, fair_price, devig_method, devig_spread, soft_book,
+               soft_price, ev)
+           VALUES (?,1,'2026-09-15T00:00:00+00:00','baseball_mlb','e1',
+                   '2026-09-15T18:00:00+00:00','pitcher_strikeouts','A Pitcher',
+                   5.5,'Over','pinnacle',1.9,1.9,0.03,0.55,1.82,'worst_case',
+                   0.004,'draftkings',1.91,0.05)""",
+        (opp_id,),
+    )
+    db.conn.commit()
+    return opp_id
+
+
 class TestDatabaseIntegration:
     def seeded(self, tmp_path):
         db = Database(tmp_path / "t.db")
+        opp = seed_opportunity(db)
         for i in range(12):
-            bid = db.place_bet(stake=50, price=1.91, book="dk", ev_at_bet=0.03)
+            bid = db.place_bet(opp, stake=50, price=1.91, book="dk")
             db.settle_bet(bid, "won" if i % 2 == 0 else "lost")
             db.record_closing_line(
-                opportunity_id=None, bet_id=bid, sharp_price_taken=1.9,
+                opportunity_id=opp, bet_id=bid, sharp_price_taken=1.9,
                 sharp_price_other=1.9, fair_prob_close=0.54, price_taken=1.91,
             )
         db.conn.execute(
@@ -224,6 +249,42 @@ class TestDatabaseIntegration:
         assert names == ["single bets", "multi-leg"]
         db.close()
 
+    def test_a_bet_the_scanner_never_surfaced_is_not_the_models(self, tmp_path):
+        # The decisive rule. A pick you made yourself is not evidence about
+        # the model, however it turned out, and pooling the two would make
+        # the comparison measure neither.
+        db = self.seeded(tmp_path)
+        mine = db.place_bet(stake=10, price=2.22, book="draftkings",
+                            selection="Max Fried", side="Under", line=4.5,
+                            market="pitcher_strikeouts", sport="baseball_mlb")
+        db.settle_bet(mine, "lost")
+        by_name = {s.name: s for s in db.compare_strategies().strategies}
+        assert "your own picks" in by_name
+        assert by_name["your own picks"].settled == 1
+        assert by_name["your own picks"].source == "manual"
+        assert by_name["single bets"].settled == 12
+        db.close()
+
+    def test_your_own_picks_are_absent_until_there_are_some(self, tmp_path):
+        db = self.seeded(tmp_path)
+        assert [s.name for s in db.compare_strategies().strategies] == [
+            "single bets", "multi-leg"
+        ]
+        db.close()
+
+    def test_manual_clv_does_not_land_on_the_models_record(self, tmp_path):
+        db = self.seeded(tmp_path)
+        mine = db.place_bet(stake=10, price=2.22, book="draftkings")
+        db.settle_bet(mine, "lost")
+        db.record_closing_line(
+            opportunity_id=None, bet_id=mine, sharp_price_taken=2.1,
+            sharp_price_other=1.8, fair_prob_close=0.40, price_taken=2.22,
+        )
+        by_name = {s.name: s for s in db.compare_strategies().strategies}
+        assert len(by_name["single bets"].clv_values) == 12
+        assert len(by_name["your own picks"].clv_values) == 1
+        db.close()
+
     def test_the_two_tables_stay_separate(self, tmp_path):
         db = self.seeded(tmp_path)
         single, parlay = db.compare_strategies().strategies
@@ -233,7 +294,7 @@ class TestDatabaseIntegration:
 
     def test_a_pending_bet_is_counted_but_not_settled(self, tmp_path):
         db = self.seeded(tmp_path)
-        db.place_bet(stake=50, price=1.91, book="dk")
+        db.place_bet(1, stake=50, price=1.91, book="dk")
         single = db.compare_strategies().strategies[0]
         assert single.pending == 1
         assert single.settled == 12
@@ -243,7 +304,7 @@ class TestDatabaseIntegration:
         # A returned stake is not a result, and counting it would dilute
         # every rate with an outcome that never happened.
         db = self.seeded(tmp_path)
-        bid = db.place_bet(stake=500, price=1.91, book="dk")
+        bid = db.place_bet(1, stake=500, price=1.91, book="dk")
         db.settle_bet(bid, "void")
         assert db.compare_strategies().strategies[0].settled == 12
         db.close()

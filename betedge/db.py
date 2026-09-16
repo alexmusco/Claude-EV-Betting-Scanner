@@ -1124,17 +1124,36 @@ class Database:
         """
         from . import performance
 
+        # Split on whether the scanner surfaced the bet. A pick you made
+        # yourself is not evidence about the model, however it turned out,
+        # and pooling the two makes the comparison measure neither.
         singles = self.conn.execute(
             "SELECT stake, pnl, ev_at_bet FROM bets "
-            "WHERE status NOT IN ('pending','void')"
+            "WHERE status NOT IN ('pending','void') AND opportunity_id IS NOT NULL"
         ).fetchall()
         single_pending = self.conn.execute(
-            "SELECT id FROM bets WHERE status='pending'"
+            "SELECT id FROM bets WHERE status='pending' "
+            "AND opportunity_id IS NOT NULL"
         ).fetchall()
+        manual = self.conn.execute(
+            "SELECT stake, pnl, ev_at_bet FROM bets "
+            "WHERE status NOT IN ('pending','void') AND opportunity_id IS NULL"
+        ).fetchall()
+        manual_pending = self.conn.execute(
+            "SELECT id FROM bets WHERE status='pending' AND opportunity_id IS NULL"
+        ).fetchall()
+        manual_clv = [
+            r["clv_ev"] for r in self.conn.execute(
+                """SELECT c.clv_ev FROM closing_lines c
+                   JOIN bets b ON b.id = c.bet_id
+                   WHERE c.clv_ev IS NOT NULL AND b.opportunity_id IS NULL"""
+            ).fetchall()
+        ]
         single_clv = [
             r["clv_ev"] for r in self.conn.execute(
-                "SELECT clv_ev FROM closing_lines "
-                "WHERE clv_ev IS NOT NULL AND bet_id IS NOT NULL"
+                """SELECT c.clv_ev FROM closing_lines c
+                   JOIN bets b ON b.id = c.bet_id
+                   WHERE c.clv_ev IS NOT NULL AND b.opportunity_id IS NOT NULL"""
             ).fetchall()
         ]
 
@@ -1156,14 +1175,22 @@ class Database:
             ).fetchall()
         ]
 
-        return performance.Comparison([
+        strategies = [
             performance.summarise(
                 "single bets", singles, single_pending, single_clv
             ),
             performance.summarise(
                 "multi-leg", parlays, parlay_pending, parlay_clv
             ),
-        ])
+        ]
+        your_own = performance.summarise(
+            "your own picks", manual, manual_pending, manual_clv, source="manual"
+        )
+        # Shown whenever there are any, because "am I beating my own
+        # model?" is a fair question and the same intervals answer it.
+        if your_own.settled or your_own.pending:
+            strategies.append(your_own)
+        return performance.Comparison(strategies)
 
     def breakdown(self, column: str) -> list[dict[str, Any]]:
         """Settled performance grouped by any bet column (sport, market, book)."""

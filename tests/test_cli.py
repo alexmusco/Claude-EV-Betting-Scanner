@@ -412,13 +412,15 @@ class TestCompareCommand:
     def seed(self, tmp_path):
         from betedge.db import Database
 
+        from test_performance import seed_opportunity
+
         db = Database(tmp_path / "t.db")
+        opp = seed_opportunity(db)
         for i in range(14):
-            bid = db.place_bet(stake=50, price=1.91, book="draftkings",
-                               ev_at_bet=0.03)
+            bid = db.place_bet(opp, stake=50, price=1.91, book="draftkings")
             db.settle_bet(bid, "won" if i % 2 == 0 else "lost")
             db.record_closing_line(
-                opportunity_id=None, bet_id=bid, sharp_price_taken=1.9,
+                opportunity_id=opp, bet_id=bid, sharp_price_taken=1.9,
                 sharp_price_other=1.9, fair_prob_close=0.54, price_taken=1.91,
             )
         db.conn.execute(
@@ -443,6 +445,20 @@ class TestCompareCommand:
         for row in ("ROI", "settled bets", "avg closing-line value",
                     "realised / modelled"):
             assert row in out
+
+    def test_bets_you_picked_yourself_get_their_own_column(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        from betedge.db import Database
+
+        db = Database(tmp_path / "t.db")
+        mine = db.place_bet(stake=10, price=2.22, book="draftkings",
+                            selection="Max Fried", side="Under", line=4.5)
+        db.settle_bet(mine, "lost")
+        db.close()
+        cli.main(["--config", str(cfg_path), "compare"])
+        out = capsys.readouterr().out
+        assert "your own picks" in out
 
     def test_it_shows_an_interval_not_just_a_point(self, wired, capsys):
         cfg_path, _client, tmp_path = wired
