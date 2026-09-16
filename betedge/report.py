@@ -442,6 +442,14 @@ def performance_report_html(db: Database, cfg: Config) -> str:
         ("ROI", lambda x: x.roi, "pct"),
         ("Modelled P&amp;L", lambda x: x.modelled_pnl, "money"),
         ("Realised / modelled", lambda x: x.realisation, "ratio"),
+        # Which bets that ratio covers. A bet logged by hand carries no
+        # modelled edge, so it is in "Settled bets" above and not in this
+        # -- and without the row the ratio reads as covering all of them.
+        (
+            "&nbsp;&nbsp;&hellip;over how many bets",
+            lambda x: x.modelled_settled if x.realisation is not None else None,
+            "int",
+        ),
         ("Avg CLV", lambda x: x.avg_clv, "pct"),
         ("CLV sample", lambda x: len(x.clv_values), "int"),
     ]:

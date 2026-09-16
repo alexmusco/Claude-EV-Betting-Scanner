@@ -763,6 +763,18 @@ def cmd_compare(cfg: Config, args) -> int:
         ),
         ("modelled P&L", [cell(s.modelled_pnl, "money") for s in strategies]),
         ("realised / modelled", [cell(s.realisation, "ratio") for s in strategies]),
+        # Which bets that ratio is actually about. A bet logged by hand
+        # carries no modelled edge, so it is in the settled count above
+        # and not in this one -- and without the row, the ratio silently
+        # looks like it covers everything.
+        (
+            "  ...over how many bets",
+            [
+                "-" if s.realisation is None
+                else cell(s.modelled_settled, "int")
+                for s in strategies
+            ],
+        ),
         ("avg closing-line value", [cell(s.avg_clv) for s in strategies]),
         ("CLV beat rate", [cell(s.clv_beat_rate, "pct0") for s in strategies]),
         ("CLV sample", [cell(len(s.clv_values), "int") for s in strategies]),

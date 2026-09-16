@@ -249,30 +249,49 @@ class TestDatabaseIntegration:
         assert names == ["single bets", "multi-leg"]
         db.close()
 
-    def test_a_bet_the_scanner_never_surfaced_is_not_the_models(self, tmp_path):
-        # The decisive rule. A pick you made yourself is not evidence about
-        # the model, however it turned out, and pooling the two would make
-        # the comparison measure neither.
+    def test_a_bet_logged_by_hand_is_still_a_single_bet(self, tmp_path):
+        # How a bet reached the ledger is bookkeeping, not strategy. The
+        # comparison is one-leg betting against multi-leg betting, and
+        # splitting on whether the scanner printed a row for it answers a
+        # different question while making both halves too small to answer
+        # anything.
         db = self.seeded(tmp_path)
         mine = db.place_bet(stake=10, price=2.22, book="draftkings",
                             selection="Max Fried", side="Under", line=4.5,
                             market="pitcher_strikeouts", sport="baseball_mlb")
         db.settle_bet(mine, "lost")
         by_name = {s.name: s for s in db.compare_strategies().strategies}
-        assert "your own picks" in by_name
-        assert by_name["your own picks"].settled == 1
-        assert by_name["your own picks"].source == "manual"
-        assert by_name["single bets"].settled == 12
-        db.close()
-
-    def test_your_own_picks_are_absent_until_there_are_some(self, tmp_path):
-        db = self.seeded(tmp_path)
         assert [s.name for s in db.compare_strategies().strategies] == [
             "single bets", "multi-leg"
         ]
+        assert by_name["single bets"].settled == 13
         db.close()
 
-    def test_manual_clv_does_not_land_on_the_models_record(self, tmp_path):
+    def test_a_hand_logged_bet_does_not_move_the_realisation_ratio(self, tmp_path):
+        """
+        It has no modelled edge, so it belongs in neither half of
+        `realised / modelled`. Counting its P&L in the numerator while it
+        contributes nothing to the denominator is how a losing hand-logged
+        bet would make the model look worse than it is -- or a winning one
+        make it look better.
+        """
+        db = self.seeded(tmp_path)
+        before = {s.name: s for s in db.compare_strategies().strategies}
+        ratio_before = before["single bets"].realisation
+        covered_before = before["single bets"].modelled_settled
+
+        mine = db.place_bet(stake=50, price=2.22, book="draftkings")
+        db.settle_bet(mine, "won")
+        after = {s.name: s for s in db.compare_strategies().strategies}
+
+        assert after["single bets"].settled == covered_before + 1
+        assert after["single bets"].modelled_settled == covered_before
+        assert after["single bets"].realisation == pytest.approx(ratio_before)
+        # But it is still in the record it belongs in.
+        assert after["single bets"].pnl > before["single bets"].pnl
+        db.close()
+
+    def test_every_single_bets_clv_lands_on_one_record(self, tmp_path):
         db = self.seeded(tmp_path)
         mine = db.place_bet(stake=10, price=2.22, book="draftkings")
         db.settle_bet(mine, "lost")
@@ -281,8 +300,7 @@ class TestDatabaseIntegration:
             sharp_price_other=1.8, fair_prob_close=0.40, price_taken=2.22,
         )
         by_name = {s.name: s for s in db.compare_strategies().strategies}
-        assert len(by_name["single bets"].clv_values) == 12
-        assert len(by_name["your own picks"].clv_values) == 1
+        assert len(by_name["single bets"].clv_values) == 13
         db.close()
 
     def test_the_two_tables_stay_separate(self, tmp_path):

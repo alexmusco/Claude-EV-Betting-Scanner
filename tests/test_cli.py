@@ -446,7 +446,7 @@ class TestCompareCommand:
                     "realised / modelled"):
             assert row in out
 
-    def test_bets_you_picked_yourself_get_their_own_column(self, wired, capsys):
+    def test_there_are_two_columns_however_a_bet_was_logged(self, wired, capsys):
         cfg_path, _client, tmp_path = wired
         self.seed(tmp_path)
         from betedge.db import Database
@@ -458,7 +458,29 @@ class TestCompareCommand:
         db.close()
         cli.main(["--config", str(cfg_path), "compare"])
         out = capsys.readouterr().out
-        assert "your own picks" in out
+        assert "your own picks" not in out
+        header = next(l for l in out.splitlines() if "single bets" in l)
+        assert header.count("single bets") == 1
+        assert "multi-leg" in header
+
+    def test_the_realisation_ratio_says_how_many_bets_it_covers(
+        self, wired, capsys
+    ):
+        # Hand-logged bets sit in the settled count and not in the ratio,
+        # so without this row the ratio silently reads as covering
+        # everything above it.
+        cfg_path, _client, tmp_path = wired
+        self.seed(tmp_path)
+        from betedge.db import Database
+
+        db = Database(tmp_path / "t.db")
+        db.settle_bet(
+            db.place_bet(stake=10, price=2.22, book="draftkings"), "lost"
+        )
+        db.close()
+        cli.main(["--config", str(cfg_path), "compare"])
+        out = capsys.readouterr().out
+        assert "...over how many bets" in out
 
     def test_it_shows_an_interval_not_just_a_point(self, wired, capsys):
         cfg_path, _client, tmp_path = wired

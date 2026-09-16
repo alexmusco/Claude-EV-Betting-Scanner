@@ -68,14 +68,18 @@ class StrategyResult:
     """One strategy's settled record, on the same metrics as the other."""
 
     name: str
-    #: What sourced these bets. A bet the scanner never surfaced is not
-    #: evidence about the scanner, however it turned out.
-    source: str = "model"
     settled: int = 0
     pending: int = 0
     staked: float = 0.0
     pnl: float = 0.0
     modelled_pnl: float | None = None
+    #: How many settled bets carried an EV at the time they were placed,
+    #: and what those bets alone actually returned. A bet logged by hand
+    #: has no modelled number, so pooling it into the numerator while it
+    #: contributes nothing to the denominator inflates the ratio below --
+    #: the more hand-logged bets there are, the further off it reads.
+    modelled_settled: int = 0
+    modelled_realised_pnl: float = 0.0
     clv_values: list[float] = field(default_factory=list)
     #: Per-bet return on stake, the raw material for every interval below.
     returns: list[float] = field(default_factory=list)
@@ -100,7 +104,10 @@ class StrategyResult:
         """
         if not self.modelled_pnl:
             return None
-        return self.pnl / self.modelled_pnl
+        # Matched numerator: only the bets that HAD a modelled edge, so
+        # the ratio compares like with like even when the ledger mixes
+        # scanner picks with bets typed in after the fact.
+        return self.modelled_realised_pnl / self.modelled_pnl
 
     @property
     def avg_clv(self) -> float | None:
@@ -169,7 +176,6 @@ def summarise(
     settled_rows: Sequence,
     pending_rows: Sequence = (),
     clv_values: Sequence[float] = (),
-    source: str = "model",
 ) -> StrategyResult:
     """
     Build one strategy's record from its settled bets.
@@ -178,7 +184,7 @@ def summarise(
     zero stake is skipped rather than dividing by it. Works on sqlite3
     rows or plain dicts, so the arithmetic is testable without a database.
     """
-    result = StrategyResult(name=name, source=source)
+    result = StrategyResult(name=name)
     modelled = 0.0
     have_modelled = False
 
@@ -196,6 +202,8 @@ def summarise(
         ev = _get(row, "ev_at_bet")
         if ev is not None:
             modelled += float(ev) * stake
+            result.modelled_settled += 1
+            result.modelled_realised_pnl += pnl
             have_modelled = True
 
     result.pending = len(list(pending_rows))

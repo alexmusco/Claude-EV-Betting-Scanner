@@ -468,11 +468,11 @@ the t-stat.
 
 The two strategies are tracked in separate tables and always have been —
 single bets in `bets`, multi-leg entries in `parlay_bets` — so nothing is
-pooled. A bet the scanner never surfaced (no `opportunity_id`, which is
-every bet logged by hand) is a third column, **your own picks**: a pick you
-made yourself is not evidence about the model however it turned out, and
-pooling them would make the comparison measure neither. `betedge compare`
-puts them all on identical metrics:
+pooled across them. Within each, how a bet reached the ledger is
+bookkeeping rather than strategy: a bet typed in after the fact is the
+same one-leg bet as one logged against a scan, and splitting on that would
+answer a question nobody asked while making both halves too small to
+answer anything. `betedge compare` puts the two on identical metrics:
 
 ```
                                     single bets           multi-leg
@@ -483,9 +483,17 @@ ROI                                     +17.78%              -3.57%
 ROI 90% interval                -1.3% to +36.9%    -46.4% to +39.3%
 modelled P&L                             +90.00              +44.80
 realised / modelled                       x5.93              x-0.45
+  ...over how many bets                      52                  28
 avg closing-line value                   +3.14%                   -
 bets needed for +/-5% ROI                 1,348               3,129
 ```
+
+One thing does depend on how a bet was logged. A hand-logged bet carries
+no modelled edge, so `realised / modelled` cannot include it — counting
+its P&L in the numerator while it contributes nothing to the denominator
+is how a single big hand-logged win would make the model look better than
+it is. The ratio is computed over the matched subset only, and the row
+beneath it says how many bets that is.
 
 **The interval row is the point.** A +17.8% against −3.6% looks decisive
 and is not: those intervals overlap heavily, so the sample is entirely
