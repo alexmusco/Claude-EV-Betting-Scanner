@@ -307,52 +307,36 @@ class BudgetConfig:
 
 
 @dataclass
-class TomatoesConfig:
+class KalshiConfig:
     """
-    Rotten Tomatoes threshold contracts on Kalshi. See tomatoes.py.
+    The Kalshi exchange. See kalshi.py.
 
-    Stricter again than the parlay path, for a reason that has nothing to
-    do with the maths: these markets are thin and settle on a number a
-    third party rounds, so the ways to be wrong are clerical rather than
-    statistical and the guards are aimed there.
+    Kalshi is an order book rather than a bookmaker: the two sides of a
+    market sum to a dollar and the cost is a fee, not vig. That makes the
+    fee schedule part of the pricing rather than an afterthought -- at a
+    coin flip a taker pays 3.5% of stake, which swamps most of the edges
+    this tool looks for.
     """
 
-    # A snapshot older than this is not a measurement of anything -- the
-    # score moves whenever a review lands, and the whole edge is knowing
-    # the count NOW.
-    max_snapshot_age_hours: float = 12.0
-    # Below this many counted reviews the posterior is too wide to mean
-    # anything, whatever it says.
-    min_reviews: int = 15
-    # Ceiling on further reviews when nothing better is known. Deliberately
-    # generous: it only ever makes the tool more cautious.
-    default_max_new_reviews: int = 60
-    # Expected further reviews, for the probabilistic branch.
-    default_expected_new_reviews: float = 20.0
-    # Weak and symmetric, worth about four reviews.
-    prior_alpha: float = 2.0
-    prior_beta: float = 2.0
-    # Log-odds shift applied to LATER reviews. Zero by default and a PRIOR,
-    # not a measurement -- see tomatoes.py. Anything only +EV because of
-    # it is flagged and staked at nothing.
-    drift: float = 0.0
-    # The EV bar, and the ceiling above which an edge means a mistake
-    # rather than an opportunity.
-    min_ev: float = 0.03
-    max_plausible_ev: float = 0.40
-    # Kelly, stricter than the single-bet quarter. These settle in days and
-    # cannot be hedged out of cheaply.
-    kelly_multiplier: float = 0.125
-    max_position_fraction: float = 0.01
-    # Positions are assumed to cross the spread unless told otherwise: the
-    # taker fee is four times the maker fee, so assuming the cheap one
-    # would flatter every position the tool prints.
-    assume_maker: bool = False
-    # Kalshi's API host. Configurable because they have moved it before --
-    # api.elections.kalshi.com dates from the elections era, and a stale
-    # record pointing somewhere with a mismatched certificate looks
-    # exactly like a broken trust store from the client side.
-    kalshi_base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
+    # Their API host. Configurable because they have moved it before, and
+    # a stale record pointing at something with a mismatched certificate
+    # is indistinguishable, from the client side, from a broken trust
+    # store.
+    base_url: str = "https://api.elections.kalshi.com/trade-api/v2"
+    # Contracts to price the fill for. The book is walked to this depth so
+    # the price quoted is one that could actually be got: on thin books
+    # the best price is often good for twenty contracts and the next
+    # level is several cents worse.
+    depth_contracts: int = 100
+    # Fee coefficients, as published. The maker multiplier defaults to
+    # zero on many series and to one on several sports series, so it is
+    # per-series rather than global -- see `series_maker_multiplier`.
+    taker_coefficient: float = 0.07
+    maker_coefficient: float = 0.0175
+    # Series where a resting order DOES pay a maker fee. Anything not
+    # listed is assumed to charge one, which is the safe direction:
+    # assuming free would flatter every resting quote the tool suggests.
+    series_maker_multiplier: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -363,7 +347,7 @@ class Config:
     bankroll: BankrollConfig = field(default_factory=BankrollConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     parlay: ParlayConfig = field(default_factory=ParlayConfig)
-    tomatoes: TomatoesConfig = field(default_factory=TomatoesConfig)
+    kalshi: KalshiConfig = field(default_factory=KalshiConfig)
     # Sports scanned for PLAYER PROPS. Expensive: one call per event per
     # market off the per-event endpoint.
     sports: list[str] = field(
@@ -425,7 +409,7 @@ class Config:
             bankroll=BankrollConfig(**raw.get("bankroll", {})),
             budget=BudgetConfig(**raw.get("budget", {})),
             parlay=ParlayConfig(**raw.get("parlay", {})),
-            tomatoes=TomatoesConfig(**raw.get("tomatoes", {})),
+            kalshi=KalshiConfig(**raw.get("kalshi", {})),
             sports=raw.get("sports", ["basketball_nba", "americanfootball_nfl"]),
             core_sports=raw.get("core_sports", []) or [],
             excluded_sports=(
