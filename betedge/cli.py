@@ -723,6 +723,180 @@ def cmd_report(cfg: Config, args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------
+# Rotten Tomatoes threshold contracts on Kalshi
+# ---------------------------------------------------------------------
+
+
+def _rt_book(cfg, args):
+    from .tomatoes import ContractBook
+
+    return ContractBook.load(getattr(args, "contracts", None))
+
+
+def cmd_rt_contracts(cfg: Config, args) -> int:
+    """
+    Print the contracts exactly as loaded, so they can be checked against
+    the exchange.
+
+    Four things decide a contract and none can be derived: which
+    Tomatometer it settles on, whether the threshold itself wins, the
+    threshold, and when it is read. An EV built on the wrong one of those
+    is not slightly wrong.
+    """
+    book = _rt_book(cfg, args)
+    origin = "your own copy" if book.is_user_copy else "shipped defaults"
+    print(f"Contracts: {book.path}  ({origin})")
+    print(f"Last verified by you: {book.last_verified_by_user or 'never'}\n")
+
+    if not book.contracts:
+        print("No contracts defined yet.\n")
+        print("Add them from the Kalshi market pages. Start your own copy "
+              "with:\n\n    betedge rt contracts --init\n")
+        return 0
+
+    for c in book.contracts:
+        extra = book.settings_for(c.ticker)
+        mark = "verified" if c.settlement_verified else "NOT VERIFIED"
+        print(f"{c.ticker}  [{mark}]")
+        print(f"  {c.describe()}   ({c.scope})")
+        print(f"  rotten tomatoes: /m/{extra.get('slug') or '?'}"
+              f"   settles: {c.settles_at or 'unknown'}")
+        ceiling = extra.get("max_new_reviews")
+        print(f"  reviews still to come: ceiling "
+              f"{ceiling if ceiling is not None else 'from config'}, "
+              f"expected {extra.get('expected_new_reviews') or 'from config'}")
+        print()
+
+    if book.unverified:
+        print("NOTHING IS STAKED ON THESE UNTIL YOU CHECK THEM:\n  "
+              + ", ".join(book.unverified))
+        print("\nOpen each on Kalshi and confirm the Tomatometer it settles "
+              "on, whether the threshold itself wins, and the settlement "
+              "time. Then set `verified: true`.")
+    return 0
+
+
+def _init_rt_contracts(cfg: Config) -> int:
+    from .tomatoes import CONTRACTS_PATH, USER_CONTRACTS_PATH
+
+    if USER_CONTRACTS_PATH.exists():
+        print(f"{USER_CONTRACTS_PATH} already exists -- leaving it alone.")
+        return 0
+    USER_CONTRACTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    USER_CONTRACTS_PATH.write_text(CONTRACTS_PATH.read_text())
+    print(f"Wrote {USER_CONTRACTS_PATH}. Edit that -- it is outside the "
+          "repository, so a `git pull` will not collide with your work.")
+    return 0
+
+
+def cmd_rt_snapshot(cfg: Config, args) -> int:
+    """Read a film's Tomatometer and print it."""
+    from . import rtfetch
+
+    try:
+        card = rtfetch.fetch(
+            args.slug, cache_dir=args.cache,
+            max_age_seconds=0.0 if args.fresh else 900.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not read /m/{args.slug}: {exc}")
+        return 1
+
+    print(f"{card.film}  (/m/{card.slug})")
+    for scope in sorted(card.scores):
+        print(f"  {card.scores[scope].describe()}")
+    return 0
+
+
+def cmd_rt_scan(cfg: Config, args) -> int:
+    """
+    Price every contract, and say what to buy.
+
+    Prices come from Kalshi's public endpoints -- no key, read only. The
+    cost used is what the order book would ACTUALLY fill at the size
+    being considered, not the top of the book: on markets this thin the
+    best price is often good for twenty contracts and the next level is
+    several cents worse.
+    """
+    from . import kalshi, rtfetch
+    from . import tomatoes as T
+
+    book = _rt_book(cfg, args)
+    if not book.contracts:
+        print(f"No contracts defined in {book.path}.")
+        print("See `betedge rt contracts` for how to add them.")
+        return 0
+
+    bankroll = args.bankroll or cfg.bankroll.amount
+    client = kalshi.MarketData()
+    rows = []
+
+    for contract in book.contracts:
+        extra = book.settings_for(contract.ticker)
+        slug = extra.get("slug")
+        if not slug:
+            rows.append((contract, None, "no rotten tomatoes slug"))
+            continue
+        try:
+            card = rtfetch.fetch(slug, cache_dir=args.cache)
+            snapshot = card.scope(contract.scope)
+        except Exception as exc:  # noqa: BLE001
+            rows.append((contract, None, f"score unreadable: {exc}"))
+            continue
+
+        price = args.price
+        if price is None:
+            try:
+                depth = client.orderbook(contract.ticker)
+                price, fillable = depth.cost_to_buy(kalshi.YES, args.size)
+                if fillable == 0:
+                    rows.append((contract, None, "nothing offered"))
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                rows.append((contract, None, f"no price: {exc}"))
+                continue
+
+        rows.append((contract, T.assess(
+            snapshot, contract, price, cfg,
+            max_new_reviews=extra.get("max_new_reviews"),
+            expected_new=extra.get("expected_new_reviews"),
+        ), None))
+
+    rows.sort(key=lambda r: (r[1].ev if r[1] else -99), reverse=True)
+
+    print(f"{'ticker':<24} {'bet':<32} {'score':>10} {'price':>7} "
+          f"{'fair':>7} {'EV':>8} {'stake':>7}")
+    print("-" * 104)
+    staked = 0
+    for contract, a, problem in rows:
+        if a is None:
+            print(f"{contract.ticker:<24} {contract.describe():<32}   "
+                  f"-- {problem}")
+            continue
+        stake = T.position_size(a, bankroll, cfg)
+        staked += 1 if stake else 0
+        print(
+            f"{contract.ticker:<24} {contract.describe():<32} "
+            f"{a.snapshot.fresh}/{a.snapshot.total:<7} "
+            f"{a.price * 100:>6.0f}c {a.probability * 100:>6.1f}c "
+            f"{a.ev:>+7.1%} "
+            f"{('$' + format(stake, ',.0f')) if stake else '--':>7}"
+        )
+        for flag in a.flags:
+            print(f"{'':<24}   ! {flag}")
+
+    print()
+    if staked:
+        print(f"{staked} position(s) worth taking.")
+    else:
+        print("Nothing worth betting. The flags above say why, one by one.")
+    if book.unverified:
+        print(f"\n{len(book.unverified)} contract(s) unverified, so staked "
+              "at nothing whatever their edge. `betedge rt contracts`.")
+    return 0
+
+
 def cmd_compare(cfg: Config, args) -> int:
     """
     Which strategy is actually making money -- and whether the sample can
@@ -1824,6 +1998,42 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--void", type=int, default=0, metavar="N",
                    help="legs that pushed and shrank the entry")
     s.set_defaults(func=cmd_parlay_settle)
+
+    p_rt = sub.add_parser(
+        "rt",
+        help="Rotten Tomatoes threshold contracts on Kalshi",
+        description="Price Kalshi contracts on a film's Tomatometer. The "
+                    "score is a running proportion, so a threshold is "
+                    "often already decided by arithmetic.",
+    )
+    rtsub = p_rt.add_subparsers(dest="rt_command", required=True)
+
+    s = rtsub.add_parser("contracts", help="print the contracts as loaded")
+    s.add_argument("--contracts", metavar="PATH", help="a contracts file")
+    s.add_argument("--init", action="store_true",
+                   help="copy the template somewhere you can edit it")
+    s.set_defaults(func=lambda cfg, args: (
+        _init_rt_contracts(cfg) if args.init else cmd_rt_contracts(cfg, args)
+    ))
+
+    s = rtsub.add_parser("snapshot", help="read a film's Tomatometer now")
+    s.add_argument("slug", help="the part of the URL after /m/")
+    s.add_argument("--cache", metavar="DIR", help="where to cache pages")
+    s.add_argument("--fresh", action="store_true", help="ignore the cache")
+    s.set_defaults(func=cmd_rt_snapshot)
+
+    s = rtsub.add_parser("scan", help="price every contract and size it")
+    s.add_argument("--contracts", metavar="PATH", help="a contracts file")
+    s.add_argument("--bankroll", type=float)
+    s.add_argument("--size", type=int, default=100, metavar="N",
+                   help="contracts to price the fill for. The book is "
+                        "walked to this depth, so the price quoted is one "
+                        "you could actually get (default 100)")
+    s.add_argument("--price", type=float, metavar="P",
+                   help="skip Kalshi and use this price, 0..1, for every "
+                        "contract. For checking the maths by hand")
+    s.add_argument("--cache", metavar="DIR", help="where to cache pages")
+    s.set_defaults(func=cmd_rt_scan)
 
     s = sub.add_parser(
         "compare",

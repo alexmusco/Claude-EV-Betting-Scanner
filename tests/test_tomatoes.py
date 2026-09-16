@@ -538,7 +538,17 @@ class TestAssessGuards:
         assert a.decided is True
         assert any("decided_by_arithmetic" in f for f in a.flags)
         assert "77-95%" in " ".join(a.flags)
+        assert "settles YES" in " ".join(a.flags)
         assert not a.suspect
+
+    def test_a_contract_decided_the_other_way_says_so(self, tcfg):
+        # The same flag text on a certain winner and a certain loser
+        # reads as support for both, and the reader is skimming.
+        a = T.assess(snap(20, 180), verified(80), price=0.20, cfg=tcfg,
+                     now=NOW, max_new_reviews=40)
+        assert a.decided is False
+        assert "settles NO" in " ".join(a.flags)
+        assert T.position_size(a, 1000.0, tcfg) == 0.0
 
     def test_a_decided_contract_bought_below_par_is_a_real_position(self, tcfg):
         a = T.assess(snap(169, 180), verified(60), price=0.80, cfg=tcfg,

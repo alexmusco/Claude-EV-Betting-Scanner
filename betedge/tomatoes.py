@@ -58,6 +58,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Kalshi's published fee coefficients. Fees are charged per ORDER and
@@ -606,11 +607,14 @@ def apply_guards(a: Assessment, cfg, now: datetime | None = None) -> Assessment:
         suspect = True
 
     if a.decided is not None:
-        # The good case, and worth naming: no model is involved, so none
-        # of the modelling guards below can apply to it.
+        # No model is involved, so none of the modelling guards below can
+        # apply. Which WAY it is decided has to be in the text: the same
+        # flag on a certain winner and a certain loser reads as support
+        # for both, and the reader is skimming.
+        outcome = "settles YES" if a.decided else "settles NO"
         flags.append(
-            f"decided_by_arithmetic(score must land in {a.bounds.low}-"
-            f"{a.bounds.high}%)"
+            f"decided_by_arithmetic({outcome}; score must land in "
+            f"{a.bounds.low}-{a.bounds.high}%)"
         )
     else:
         if a.snapshot.total < tc.min_reviews:
@@ -666,3 +670,93 @@ def position_size(a: Assessment, bankroll: float, cfg) -> float:
     return round(
         min(fraction, tc.max_position_fraction) * bankroll, 2
     )
+
+
+# ---------------------------------------------------------------------------
+# Contracts as configuration
+# ---------------------------------------------------------------------------
+
+CONTRACTS_PATH = Path(__file__).parent / "data" / "rt_contracts.yaml"
+USER_CONTRACTS_PATH = Path("data") / "rt_contracts.yaml"
+
+
+@dataclass
+class ContractBook:
+    """The contracts to price, loaded from YAML because they are checked
+    by a person rather than derived."""
+
+    contracts: list[Contract]
+    settings: dict[str, dict]
+    path: Path | None = None
+    last_verified_by_user: object = None
+    is_user_copy: bool = False
+
+    @property
+    def unverified(self) -> list[str]:
+        return [c.ticker for c in self.contracts if not c.settlement_verified]
+
+    def settings_for(self, ticker: str) -> dict:
+        return self.settings.get(ticker, {})
+
+    @classmethod
+    def resolve_path(cls, path=None) -> tuple[Path, bool]:
+        """Explicit path, else the user's own copy, else what ships."""
+        if path:
+            return Path(path), True
+        if USER_CONTRACTS_PATH.exists():
+            return USER_CONTRACTS_PATH, True
+        return CONTRACTS_PATH, False
+
+    @classmethod
+    def load(cls, path=None) -> "ContractBook":
+        import yaml
+
+        resolved, is_user = cls.resolve_path(path)
+        raw = yaml.safe_load(resolved.read_text()) or {}
+        contracts: list[Contract] = []
+        settings: dict[str, dict] = {}
+        seen: set[str] = set()
+
+        for entry in raw.get("contracts") or []:
+            ticker = str(entry.get("ticker") or "").strip()
+            if not ticker:
+                raise ValueError(f"{resolved}: a contract has no ticker")
+            if ticker in seen:
+                # Two rows for one market would be priced and staked
+                # twice, which is how one position becomes two.
+                raise ValueError(f"{resolved}: {ticker} appears twice")
+            seen.add(ticker)
+            contracts.append(Contract(
+                ticker=ticker,
+                film=str(entry.get("film") or entry.get("slug") or ticker),
+                threshold=int(entry["threshold"]),
+                direction=str(entry.get("direction") or ABOVE),
+                inclusive=bool(entry.get("inclusive", True)),
+                scope=str(entry.get("scope") or SCOPE_ALL_CRITICS),
+                settles_at=_parse_time(entry.get("settles_at")),
+                settlement_verified=bool(entry.get("verified", False)),
+            ))
+            settings[ticker] = {
+                "slug": str(entry.get("slug") or ""),
+                "max_new_reviews": entry.get("max_new_reviews"),
+                "expected_new_reviews": entry.get("expected_new_reviews"),
+            }
+
+        meta = raw.get("meta") or {}
+        return cls(
+            contracts=contracts, settings=settings, path=resolved,
+            last_verified_by_user=meta.get("last_verified_by_user"),
+            is_user_copy=is_user,
+        )
+
+
+def _parse_time(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

@@ -1,0 +1,84 @@
+# ===========================================================================
+# ROTTEN TOMATOES CONTRACTS
+#
+# READ THIS BEFORE TRUSTING ANY EV NUMBER THIS TOOL PRINTS.
+#
+# Every contract here starts `verified: false` and is staked at NOTHING
+# until you have opened the contract on Kalshi and confirmed four things
+# yourself. On these markets the ways to lose are clerical, not
+# statistical -- the model is arithmetic, but arithmetic about the wrong
+# question is still wrong.
+#
+#   1. scope          Which Tomatometer? Rotten Tomatoes publishes TWO and
+#                     they are not close. Resident Evil sits at 36% on All
+#                     Critics and 30% on Top Critics -- six points apart on
+#                     the same film, the same day. A contract with a
+#                     threshold between those settles opposite ways
+#                     depending on which one it means.
+#
+#   2. inclusive      Does the threshold itself win? "60% or above" and
+#                     "above 60%" differ by exactly one outcome, and that
+#                     outcome happens more often than you would think
+#                     because the score is a whole number.
+#
+#   3. threshold      The number, as a whole percent. Rotten Tomatoes
+#                     rounds -- a film sitting at 60.4% DISPLAYS 60, and
+#                     the contract settles on what is displayed.
+#
+#   4. settles_at     When it is read. The score moves whenever a review
+#                     lands, so a contract settling Friday and one settling
+#                     the following Tuesday are different bets on the same
+#                     film.
+#
+# Set `verified: true` only after you have checked all four against the
+# contract itself, not against this file and not against what seems
+# obvious.
+#
+#   betedge rt contracts          prints exactly what is loaded here
+#   betedge rt scan               prices them
+#
+# ---------------------------------------------------------------------------
+# FIELDS
+#
+#   ticker      the Kalshi market ticker, exactly as the exchange shows it
+#   slug        the Rotten Tomatoes URL slug: the part after /m/
+#   film        for display only
+#   threshold   whole percent
+#   direction   above | below
+#   inclusive   true when the threshold itself settles YES
+#   scope       all_critics | top_critics
+#   settles_at  ISO timestamp, e.g. 2026-09-26T21:00:00Z
+#   max_new_reviews
+#               CEILING on further reviews before settlement, not an
+#               estimate. Err HIGH: too high only widens the bounds and
+#               makes the tool decline bets, while too low invents
+#               certainty that is not there.
+#   expected_new_reviews
+#               best guess at how many actually arrive, for the
+#               probabilistic branch
+# ===========================================================================
+
+meta:
+  version: 1
+  # Bump when you last checked these against the exchange.
+  last_verified_by_user: null
+
+contracts: []
+
+# ---------------------------------------------------------------------------
+# An example, commented out. Copy it, fill it in from the real contract,
+# and only then set verified: true.
+#
+# contracts:
+#   - ticker: KXRTSCORE-26SEP26XYZ-T60
+#     slug: some_film_2026
+#     film: Some Film
+#     threshold: 60
+#     direction: above
+#     inclusive: true
+#     scope: all_critics
+#     settles_at: 2026-09-26T21:00:00Z
+#     max_new_reviews: 80
+#     expected_new_reviews: 25
+#     verified: false
+# ---------------------------------------------------------------------------

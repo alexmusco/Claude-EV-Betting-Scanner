@@ -993,3 +993,6 @@ entry point is never created.
 | `bet parlay scan` | budgeted | Build and rank multi-leg tickets |
 | `bet parlay bet <id> --stake N` | free | Log an entry you placed |
 | `bet parlay settle <id> --hit K` | free | Settle it by how many legs landed |
+| `bet rt contracts` | free | The Rotten Tomatoes contracts as loaded. **Read this before trusting any EV.** |
+| `bet rt snapshot <slug>` | free | Read a film's Tomatometer now, both scopes, with counts |
+| `bet rt scan` | free | Price every RT contract against Kalshi's book and size it |
