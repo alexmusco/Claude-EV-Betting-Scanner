@@ -68,11 +68,23 @@ class TestPayoutTable:
         assert "underdog_standard" in table.products
         assert "prizepicks_power" in table.products
 
-    def test_the_pickem_products_ship_unverified(self, table):
-        # They vary by state and change without notice, so shipping them
-        # marked verified would be a lie the report then repeats.
+    def test_an_unchecked_pickem_product_ships_unverified(self, table):
+        # They vary by state and change without notice, so shipping one
+        # marked verified would be a lie the report then repeats. Underdog
+        # has not been read off the operator's own payout page, so it
+        # stays unverified until someone does that.
         assert "underdog_standard" in table.unverified
-        assert "prizepicks_flex" in table.unverified
+        assert "underdog_flex" in table.unverified
+
+    def test_the_prizepicks_ladders_are_marked_checked(self, table):
+        # These were read off PrizePicks' published payouts page, so the
+        # standard rates are not guesswork. The state-by-state and
+        # same-game caveats are carried by their own flags rather than by
+        # pretending the numbers are unknown.
+        assert "prizepicks_power" not in table.unverified
+        assert "prizepicks_flex" not in table.unverified
+        assert table.get("prizepicks_power").same_game_may_reduce
+        assert table.get("prizepicks_flex").same_game_may_reduce
 
     def test_an_unknown_product_names_what_is_available(self, table):
         with pytest.raises(ValueError, match="underdog_standard"):
@@ -154,8 +166,37 @@ class TestPayoutMath:
 
     def test_prizepicks_power_by_hand(self, table):
         p = table.get("prizepicks_power")
-        assert self.ev_at(p, 3, 0.6) == pytest.approx(0.216 * 5.0 - 1.0)
+        assert self.ev_at(p, 3, 0.6) == pytest.approx(0.216 * 6.0 - 1.0)
         assert self.ev_at(p, 6, 0.6) == pytest.approx(0.6 ** 6 * 37.5 - 1.0)
+
+    def test_prizepicks_small_entries_hold_less_than_large_ones(self, table):
+        """
+        Across 2-, 3-, 4- and 5-pick Power Play the hold on a coin-flip
+        picker is exactly 25%, 25%, 37.5% and 37.5%. That is not a
+        coincidence and it is the whole argument against chasing the
+        multiple: the bigger ladders are worse before a single leg is
+        chosen.
+        """
+        p = table.get("prizepicks_power")
+        assert self.ev_at(p, 2, 0.5) == pytest.approx(-0.25)
+        assert self.ev_at(p, 3, 0.5) == pytest.approx(-0.25)
+        assert self.ev_at(p, 4, 0.5) == pytest.approx(-0.375)
+        assert self.ev_at(p, 6, 0.5) == pytest.approx(37.5 / 64 - 1.0)
+
+    def test_a_prizepicks_flex_push_settles_on_the_power_table(self, table):
+        """
+        The published rule breaks its own pattern at three: a 3-pick FLEX
+        with a tie settles as a 2-pick POWER (3x), not as a 2-pick flex
+        (2x). Left to fall out of which tables happen to exist, getting
+        this right would have been an accident.
+        """
+        flex = table.get("prizepicks_flex")
+        assert flex.payouts[2] == (0.0, 0.5, 2.0)          # a real 2-pick flex
+        grid = flex.multiple_grid(3)
+        assert grid[1][2] == pytest.approx(3.0)            # one push, two hits
+        assert grid[0][3] == pytest.approx(3.0)            # no push, three hits
+        # A 4-pick shrinks to the 3-pick FLEX table, not the power one.
+        assert flex.multiple_grid(4)[1][2] == pytest.approx(1.0)
 
     def test_prizepicks_six_pick_flex_by_hand(self, table):
         p, q, n = 0.6, 0.4, 6
@@ -803,6 +844,42 @@ class TestGuards:
         t = P.evaluate_ticket(legs, P.parlay_product(legs), cfg, priors)
         assert "sgp_price_may_be_discounted_by_the_book" in t.flags
 
+    def test_a_same_game_pickem_lineup_warns_the_ladder_may_be_cut(
+        self, pcfg, priors, table
+    ):
+        """
+        PrizePicks publishes that a lineup with several players from one
+        game may pay a reduced rate. Every ticket this tool likes is that
+        lineup, so the caveat cannot sit in a YAML comment.
+        """
+        legs = [make_leg(selection="A", market="player_pass_yds", event_id="g1"),
+                make_leg(selection="B", market="player_reception_yds",
+                         event_id="g1")]
+        t = self.evaluate(legs, pcfg, priors, table, key="prizepicks_power")
+        assert any("same_game_lineup_multiplier_may_be_cut" in f for f in t.flags)
+
+    def test_a_cross_game_pickem_lineup_carries_no_such_warning(
+        self, pcfg, priors, table
+    ):
+        legs = [make_leg(selection="A", market="player_pass_yds", event_id="g1"),
+                make_leg(selection="B", market="player_reception_yds",
+                         event_id="g2")]
+        t = self.evaluate(legs, pcfg, priors, table, key="prizepicks_power")
+        assert not any(
+            "same_game_lineup_multiplier_may_be_cut" in f for f in t.flags
+        )
+
+    def test_a_book_that_makes_no_such_claim_is_not_given_one(
+        self, pcfg, priors, table
+    ):
+        legs = [make_leg(selection="A", market="player_pass_yds", event_id="g1"),
+                make_leg(selection="B", market="player_reception_yds",
+                         event_id="g1")]
+        t = self.evaluate(legs, pcfg, priors, table, key="underdog_standard")
+        assert not any(
+            "same_game_lineup_multiplier_may_be_cut" in f for f in t.flags
+        )
+
     def test_unknown_teams_are_disclosed(self, pcfg, priors, table):
         legs = [make_leg(selection="A", market="player_pass_yds", team=None),
                 make_leg(selection="B", market="player_reception_yds", team=None)]
@@ -1426,12 +1503,22 @@ class TestBothPickemBooks:
         legs = [make_leg(selection="A", market="m1", fair_prob=0.60),
                 make_leg(selection="B", market="m2", fair_prob=0.60),
                 make_leg(selection="C", market="m3", fair_prob=0.60)]
-        ud = P.evaluate_ticket(legs, table.get("underdog_standard"), pcfg, priors)
-        pp = P.evaluate_ticket(legs, table.get("prizepicks_power"), pcfg, priors)
-        # 6x against 5x on an identical three-leg set.
-        assert ud.payout_all_hit == 6.0
-        assert pp.payout_all_hit == 5.0
-        assert ud.ev > pp.ev
+        ud = P.evaluate_ticket(legs, table.get("underdog_flex"), pcfg, priors)
+        pp = P.evaluate_ticket(legs, table.get("prizepicks_flex"), pcfg, priors)
+        # 2.25x against 3x on an identical three-leg set -- PrizePicks pays
+        # more when all three land, Underdog pays more when one misses
+        # (1.25x against stake back), so the ladders are not
+        # interchangeable in either direction.
+        assert ud.payout_all_hit == 2.25
+        assert pp.payout_all_hit == 3.0
+        assert pp.ev > ud.ev
+
+    def test_the_two_books_three_pick_ladders_now_agree(self, pcfg, priors, table):
+        # They did not always: PrizePicks' 3-pick Power Play is 6x, the
+        # same as Underdog's, and modelling it at 5x understated the best
+        # structure on the board by three points of break-even.
+        assert table.get("prizepicks_power").payouts[3] == (0, 0, 0, 6.0)
+        assert table.get("underdog_standard").payouts[3] == (0, 0, 0, 6.0)
 
     def test_a_leg_only_one_book_quotes_still_builds_there(self, pcfg, priors, table):
         from fixtures import two_book_event

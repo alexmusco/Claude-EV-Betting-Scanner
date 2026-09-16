@@ -597,6 +597,61 @@ def cmd_settle(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_delete(cfg: Config, args) -> int:
+    """
+    Remove bets from the ledger.
+
+    This exists because a wrong row is worse than a missing one. The
+    strategy comparison divides realised P&L by modelled P&L to ask whether
+    a claimed edge actually shows up; five bets that were never placed make
+    that ratio meaningless, and they do it quietly -- the table looks fine,
+    it is just answering a different question than the one asked.
+
+    Nothing is deleted until every id has been printed, because the ids are
+    the easiest thing in the world to get wrong by one.
+    """
+    db = Database(cfg.database)
+    rows = []
+    missing = []
+    for bet_id in args.bet_ids:
+        row = db.get_bet(bet_id)
+        (rows if row is not None else missing).append(row if row is not None else bet_id)
+
+    if missing:
+        print(f"No bet with id: {', '.join(str(m) for m in missing)}")
+    if not rows:
+        db.close()
+        return 1
+
+    print("About to delete:")
+    for row in rows:
+        stake = row["stake"] or 0.0
+        pnl = row["pnl"]
+        settled = f"{row['status']} {pnl:+,.2f}" if pnl is not None else row["status"]
+        print(
+            f"  #{row['id']}  {row['selection'] or '?'} "
+            f"{row['side'] or ''} {row['line'] if row['line'] is not None else ''}"
+            f" ({row['market'] or '?'}) on {row['book']} "
+            f"for {stake:,.2f} -- {settled}"
+        )
+
+    if not args.yes:
+        try:
+            answer = input(f"Delete {len(rows)} bet(s)? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("Left alone.")
+            db.close()
+            return 1
+
+    for row in rows:
+        db.delete_bet(row["id"])
+    print(f"Deleted {len(rows)} bet(s). Re-run `betedge compare` to see the ledger.")
+    db.close()
+    return 0
+
+
 def cmd_close(cfg: Config, args) -> int:
     db = Database(cfg.database)
     client = build_client(cfg)
@@ -1359,6 +1414,16 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
             f"   |   a pushed leg: {product.void_behaviour}"
             + (f" -> {product.reduces_to}" if product.reduces_to else "")
         )
+        for size, target in sorted(product.reduce_map.items()):
+            print(f"    except a {size}-pick, which settles on {target}'s "
+                  f"{size - 1}-pick table")
+        if product.same_game_may_reduce:
+            print("  NOTE: the book may cut this ladder for a lineup with "
+                  "several players from one game -- which is the lineup this "
+                  "tool looks for. Check the entry screen.")
+        if product.note:
+            for line in _wrap(product.note, width=74):
+                print(f"  {line}")
         if not product.payouts:
             print("  priced by the book at entry time, not from this table")
         for legs in product.leg_counts:
@@ -1612,6 +1677,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("bet_id", type=int)
     s.add_argument("status", choices=["won", "lost", "push", "void", "half_won", "half_lost"])
     s.set_defaults(func=cmd_settle)
+
+    s = sub.add_parser("delete", help="remove bets from the ledger")
+    s.add_argument("bet_ids", type=int, nargs="+",
+                   help="bet ids, as `betedge export` or `betedge report` list them")
+    s.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt")
+    s.set_defaults(func=cmd_delete)
 
     s = sub.add_parser("close", help="capture closing lines for open bets")
     s.add_argument("--window", type=float, default=20.0,

@@ -1175,7 +1175,9 @@ class TestPayoutsInit:
         target = self.user_path(tmp_path, monkeypatch)
         run(["--config", str(cfg_path), "parlay", "verify-payouts", "--init"])
         target.write_text(
-            target.read_text().replace("3: [0, 0, 0, 5.0]", "3: [0, 0, 0, 6.0]")
+            target.read_text().replace(
+                "6: [0, 0, 0, 0, 0, 0, 37.5]", "6: [0, 0, 0, 0, 0, 0, 30.0]"
+            )
         )
         capsys.readouterr()
         run(["--config", str(cfg_path), "parlay", "verify-payouts"])

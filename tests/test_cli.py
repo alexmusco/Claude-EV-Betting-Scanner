@@ -536,3 +536,112 @@ class TestEventIdWarning:
                   "--event-id", "evt1",
                   "--selection", "Max Fried", "--side", "Under", "--line", "4.5"])
         assert "no event id" not in capsys.readouterr().out
+
+
+class TestDeleteCommand:
+    """
+    A bet that was never placed is worse than a missing one: it does not
+    just add noise, it moves `realised / modelled`, which is the one number
+    in the comparison that claims to say whether an edge is real.
+    """
+
+    def place(self, cfg_path, selection, settle=None):
+        argv = ["--config", str(cfg_path), "bet", "--stake", "10",
+                "--price", "1.91", "--book", "draftkings",
+                "--selection", selection, "--side", "Under", "--line", "4.5"]
+        if settle:
+            argv += ["--settle", settle]
+        cli.main(argv)
+
+    def test_it_lists_what_it_will_remove_before_removing_it(
+        self, wired, capsys, monkeypatch
+    ):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried", settle="lost")
+        capsys.readouterr()
+        monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+        assert cli.main(["--config", str(cfg_path), "delete", "1"]) == 0
+        out = capsys.readouterr().out
+        assert "About to delete" in out
+        assert "Max Fried" in out
+        db = Database(tmp_path / "t.db")
+        assert db.get_bet(1) is None
+        db.close()
+
+    def test_declining_the_prompt_leaves_the_bet_alone(
+        self, wired, capsys, monkeypatch
+    ):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried", settle="lost")
+        monkeypatch.setattr("builtins.input", lambda _prompt: "")
+        assert cli.main(["--config", str(cfg_path), "delete", "1"]) == 1
+        assert "Left alone" in capsys.readouterr().out
+        db = Database(tmp_path / "t.db")
+        assert db.get_bet(1) is not None
+        db.close()
+
+    def test_yes_skips_the_prompt(self, wired, capsys, monkeypatch):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried", settle="lost")
+
+        def no_input(_prompt):  # pragma: no cover - must never run
+            raise AssertionError("--yes should not prompt")
+
+        monkeypatch.setattr("builtins.input", no_input)
+        assert cli.main(["--config", str(cfg_path), "delete", "1", "--yes"]) == 0
+        db = Database(tmp_path / "t.db")
+        assert db.get_bet(1) is None
+        db.close()
+
+    def test_an_unknown_id_is_named_and_nothing_else_is_touched(
+        self, wired, capsys
+    ):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried", settle="lost")
+        capsys.readouterr()
+        assert cli.main(["--config", str(cfg_path), "delete", "1", "99",
+                         "--yes"]) == 0
+        out = capsys.readouterr().out
+        assert "No bet with id: 99" in out
+        db = Database(tmp_path / "t.db")
+        assert db.get_bet(1) is None
+        db.close()
+
+    def test_deleting_only_unknown_ids_changes_nothing(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried", settle="lost")
+        capsys.readouterr()
+        assert cli.main(["--config", str(cfg_path), "delete", "99", "--yes"]) == 1
+        db = Database(tmp_path / "t.db")
+        assert db.get_bet(1) is not None
+        db.close()
+
+    def test_the_deleted_bets_leave_the_comparison(self, wired, capsys):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried", settle="lost")
+        self.place(cfg_path, "Zack Wheeler", settle="won")
+        capsys.readouterr()
+        cli.main(["--config", str(cfg_path), "delete", "1", "2", "--yes"])
+        capsys.readouterr()
+        cli.main(["--config", str(cfg_path), "compare"])
+        out = capsys.readouterr().out
+        assert "Nothing settled" in out or "settled bets" in out
+        db = Database(tmp_path / "t.db")
+        assert db.conn.execute("SELECT COUNT(*) c FROM bets").fetchone()["c"] == 0
+        db.close()
+
+    def test_a_closing_line_goes_with_the_bet(self, wired, tmp_path):
+        cfg_path, _client, tmp_path = wired
+        self.place(cfg_path, "Max Fried")
+        db = Database(tmp_path / "t.db")
+        db.conn.execute(
+            "INSERT INTO closing_lines (bet_id, captured_at, clv_ev) "
+            "VALUES (1, '2026-09-15T00:00:00+00:00', 0.02)"
+        )
+        db.conn.commit()
+        assert db.delete_bet(1) is not None
+        left = db.conn.execute(
+            "SELECT COUNT(*) c FROM closing_lines WHERE bet_id=1"
+        ).fetchone()["c"]
+        assert left == 0
+        db.close()

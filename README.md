@@ -974,6 +974,7 @@ entry point is never created.
 | `bet show` | free | Re-print a scan |
 | `bet bet <id> --stake N` | free | Log a bet you placed |
 | `bet settle <id> won` | free | Settle it |
+| `bet delete <id> ...` | free | Remove bets from the ledger — a bet you never placed distorts every ratio in `bet compare` |
 | `bet close` | ~1/event | Capture closing lines |
 | `bet report` | free | Performance and CLV |
 | `bet export <path>` | free | CSV, or your Excel tracker if the path ends `.xlsx` |

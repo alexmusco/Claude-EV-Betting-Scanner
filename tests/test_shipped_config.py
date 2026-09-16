@@ -226,17 +226,21 @@ class TestParlaySection:
 
 
 class TestShippedDataFiles:
-    def test_the_payout_table_ships_unverified(self):
+    def test_the_payout_table_ships_with_unchecked_ladders_flagged(self):
         """
         The multipliers vary by state and change without notice, so
-        shipping them marked verified would be a lie the report repeats on
-        every ticket.
+        shipping an unchecked one marked verified would be a lie the
+        report repeats on every ticket. Underdog has not been read off the
+        operator's payout page; PrizePicks has.
         """
         from betedge.parlay import PayoutTable
 
         table = PayoutTable.load()
-        assert table.unverified
-        assert table.last_verified_by_user is None
+        assert "underdog_standard" in table.unverified
+        assert "underdog_flex" in table.unverified
+        # And the meta line has to say WHICH ladders that date covers,
+        # or a reader takes it for the whole file.
+        assert "Underdog NOT checked" in str(table.last_verified_by_user)
 
     def test_no_shipped_structure_is_beatable_by_a_coin_flip(self):
         """

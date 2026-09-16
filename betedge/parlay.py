@@ -169,6 +169,17 @@ class Product:
     #: an ordinary 2-pick, not a refund.
     fallback_payouts: dict[int, tuple[float, ...]] = field(default_factory=dict)
     reduces_to: str | None = None
+    #: Sizes where a push does NOT settle on this product's own table for
+    #: the reduced size. PrizePicks shrinks a 3-pick flex to a 2-pick
+    #: POWER, not to a 2-pick flex, and the two pay differently (3x vs
+    #: 2x); leaving that to depend on which tables happen to be missing
+    #: made the right answer an accident.
+    reduce_vectors: dict[int, tuple[float, ...]] = field(default_factory=dict)
+    reduce_map: dict[int, str] = field(default_factory=dict)
+    #: True when the operator says the standard ladder may be cut for a
+    #: lineup with several players from one game. That is exactly the
+    #: lineup this optimizer looks for, so it cannot be a footnote.
+    same_game_may_reduce: bool = False
     note: str = ""
 
     @property
@@ -190,6 +201,20 @@ class Product:
     def vector_for(self, legs: int) -> tuple[float, ...] | None:
         """The payout vector for an entry of `legs` legs, if one exists."""
         return self.payouts.get(legs) or self.fallback_payouts.get(legs)
+
+    def reduced_vector(self, legs: int, original: int) -> tuple[float, ...] | None:
+        """
+        The payout vector an entry SHRINKS to when pushes cut it from
+        `original` legs down to `legs`.
+
+        Usually the same table an entry of that size would have used, but
+        not always: `reduce_map` records the sizes where the operator
+        settles a shrunk entry on a different product entirely.
+        """
+        override = self.reduce_vectors.get(original)
+        if override is not None and len(override) == legs + 1:
+            return override
+        return self.vector_for(legs)
 
     def all_hit_multiple(self, legs: int) -> float:
         vector = self.vector_for(legs)
@@ -273,7 +298,9 @@ class Product:
             if v > 0 and self.void_behaviour == "refund":
                 grid[v, : remaining + 1] = 1.0
                 continue
-            vector = self.vector_for(remaining) if remaining > 0 else None
+            vector = (
+                self.reduced_vector(remaining, legs) if remaining > 0 else None
+            )
             if vector is None:
                 # No table for an entry this small: the stake comes back.
                 grid[v, : remaining + 1] = 1.0
@@ -344,6 +371,11 @@ class PayoutTable:
                 allows_same_player=bool(spec.get("allows_same_player", False)),
                 void_behaviour=void_behaviour,
                 reduces_to=spec.get("reduces_to"),
+                reduce_map={
+                    int(k): str(v)
+                    for k, v in (spec.get("reduce_map") or {}).items()
+                },
+                same_game_may_reduce=bool(spec.get("same_game_may_reduce", False)),
                 note=(spec.get("note") or "").strip(),
             )
 
@@ -358,6 +390,24 @@ class PayoutTable:
                         "which is not a product in this file"
                     )
                 product.fallback_payouts.update(target.payouts)
+
+        # And resolve the per-size reduction overrides the same way, now
+        # that every product named by one is guaranteed to be parsed.
+        for key, product in list(products.items()):
+            for size, target_key in product.reduce_map.items():
+                target = products.get(target_key)
+                if target is None:
+                    raise ValueError(
+                        f"{p}: {key} reduce_map[{size}] names {target_key!r}, "
+                        "which is not a product in this file"
+                    )
+                vector = target.payouts.get(size - 1)
+                if vector is None:
+                    raise ValueError(
+                        f"{p}: {key} reduce_map[{size}] points at {target_key!r}, "
+                        f"which has no {size - 1}-pick table to shrink into"
+                    )
+                product.reduce_vectors[size] = vector
 
         meta = raw.get("meta") or {}
         return cls(
@@ -1311,6 +1361,15 @@ def apply_guards(ticket: Ticket, cfg: Config) -> Ticket:
 
     if ticket.product.kind == KIND_PARLAY and ticket.same_game:
         flags.append("sgp_price_may_be_discounted_by_the_book")
+
+    if ticket.product.same_game_may_reduce and ticket.same_game:
+        # PrizePicks publishes that "lineups with multiple athletes playing
+        # in the same game may have reduced payout rates". Every ticket
+        # this optimizer likes is exactly that lineup, so the standard
+        # ladder it was scored on may not be the one the entry settles at.
+        # Not suspect -- the EV is right IF the ladder holds -- but the
+        # entry screen is the only place that answers it.
+        flags.append("same_game_lineup_multiplier_may_be_cut(check the entry screen)")
 
     for leg in ticket.legs:
         for f in leg.flags:

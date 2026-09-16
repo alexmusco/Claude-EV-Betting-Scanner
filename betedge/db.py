@@ -1016,6 +1016,28 @@ class Database:
     def get_bet(self, bet_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
 
+    def delete_bet(self, bet_id: int) -> sqlite3.Row | None:
+        """
+        Remove a bet from the ledger entirely, with its closing lines.
+
+        Settling a bet you never placed is not the same as never having
+        placed it: a phantom win inflates realised P&L and, worse, the
+        `realised / modelled` ratio that is supposed to answer whether the
+        model's claimed edge shows up. There is no soft-delete here on
+        purpose -- a row kept "for the record" is a row some later query
+        will count.
+
+        Returns the row as it was, so the caller can say what it removed,
+        or None if there was nothing with that id.
+        """
+        row = self.get_bet(bet_id)
+        if row is None:
+            return None
+        with self.conn:
+            self.conn.execute("DELETE FROM closing_lines WHERE bet_id=?", (bet_id,))
+            self.conn.execute("DELETE FROM bets WHERE id=?", (bet_id,))
+        return row
+
     def latest_scan_id(self) -> int | None:
         row = self.conn.execute("SELECT MAX(id) AS id FROM scans").fetchone()
         return row["id"] if row else None
