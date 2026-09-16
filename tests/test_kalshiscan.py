@@ -448,3 +448,122 @@ class TestCollectGameMarkets:
 
         assert KS.collect_game_markets(Broken([]), lines) == (
             [], Counter(), Counter())
+
+
+class TestTheMoneylineRung:
+    """
+    A market asking only who wins is a rung at zero, and it may be all an
+    exchange lists for a game. Refusing it would have skipped every
+    market on Kalshi's KXNFLGAME series.
+    """
+
+    @pytest.fixture
+    def setup(self):
+        cfg = Config()
+        priors = L.PriorSet.load()
+        (line,) = KS.game_lines([odds_event()])
+        model = L.fit(line.spread, line.fair_win_prob,
+                      "americanfootball_nfl", priors)
+        return cfg, line, model
+
+    @pytest.mark.parametrize("title", [
+        "Will the Chiefs beat the Broncos?",
+        "Chiefs vs Broncos: Chiefs win",
+        "Will the Chiefs defeat the Broncos?",
+    ])
+    def test_a_winner_market_is_a_rung_at_zero(self, title):
+        threshold, problem = KS.parse_rung(
+            FakeMarket("T", title), "Kansas City Chiefs", "Denver Broncos"
+        )
+        assert threshold == 0.0
+        assert problem == ""
+
+    @pytest.mark.parametrize("title", [
+        "Chiefs to win by more than 6.5",
+        "Chiefs vs Broncos total points over 44.5",
+        "Chiefs first quarter winner",
+    ])
+    def test_something_else_is_not_mistaken_for_one(self, title):
+        threshold, _problem = KS.parse_rung(
+            FakeMarket("T", title), "Kansas City Chiefs", "Denver Broncos"
+        )
+        assert threshold != 0.0
+
+    @pytest.mark.parametrize("title", [
+        "Chiefs to win the AFC",
+        "Will the Chiefs win the Super Bowl?",
+        "Chiefs to win their division",
+    ])
+    def test_a_futures_market_is_not_this_game_s_moneyline(self, title):
+        """
+        Priced as a moneyline, "Chiefs to win the AFC" would be compared
+        against Thursday's de-vigged win probability. That is not
+        slightly wrong, it is a different question entirely -- and the
+        numbers would all look perfectly reasonable.
+        """
+        threshold, problem = KS.parse_rung(
+            FakeMarket("T", title), "Kansas City Chiefs", "Denver Broncos"
+        )
+        assert threshold is None
+        assert problem
+
+    def test_a_game_names_both_teams_and_a_future_names_one(self):
+        # The principled check behind the word list: two teams means a
+        # game, one means something season-long.
+        game, _ = KS.parse_rung(
+            FakeMarket("T", "Will the Chiefs beat the Broncos?"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        future, problem = KS.parse_rung(
+            FakeMarket("T", "Will the Chiefs win it all?"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        assert game == 0.0
+        assert future is None
+        assert "names one team only" in problem
+
+    def test_it_still_has_to_say_which_team(self):
+        threshold, problem = KS.parse_rung(
+            FakeMarket("T", "Who will win?"), "Kansas City Chiefs",
+            "Denver Broncos"
+        )
+        assert threshold is None
+        assert "which team" in problem
+
+    def test_it_is_priced_from_the_sharp_moneyline_not_the_model(self, setup):
+        """
+        The one rung the sharp book quotes DIRECTLY. Its de-vigged
+        moneyline is a better estimate of who wins than this model
+        produces -- the model exists for the rungs Pinnacle does not
+        price, and using it here would mean disagreeing with the
+        sharpest number on the board for no reason.
+        """
+        cfg, line, model = setup
+        markets = [FakeMarket("KXNFLGAME-1", "Will the Chiefs beat the Broncos?")]
+        books = {"KXNFLGAME-1": book(no_bids=[[40, 500]])}
+        (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert quote.fair == pytest.approx(line.fair_win_prob)
+        assert quote.fair != pytest.approx(model.prob_margin_over(0.0))
+
+    def test_and_says_so_on_the_quote(self, setup):
+        cfg, line, model = setup
+        markets = [FakeMarket("KXNFLGAME-1", "Will the Chiefs beat the Broncos?")]
+        books = {"KXNFLGAME-1": book(no_bids=[[40, 500]])}
+        (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert "priced_from_the_sharp_moneyline" in " ".join(quote.flags)
+
+    def test_it_describes_itself_as_a_moneyline(self, setup):
+        cfg, line, model = setup
+        markets = [FakeMarket("KXNFLGAME-1", "Will the Chiefs beat the Broncos?")]
+        books = {"KXNFLGAME-1": book(no_bids=[[40, 500]])}
+        (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert "to win" in quote.describe()
+        assert "Kansas City Chiefs" in quote.describe()
+
+    def test_a_real_ladder_rung_still_uses_the_model(self, setup):
+        cfg, line, model = setup
+        markets = [FakeMarket("T", "Chiefs to beat the Broncos by more than 9.5")]
+        books = {"T": book(no_bids=[[60, 500]])}
+        (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert quote.fair == pytest.approx(model.prob_margin_over(9.5))
+        assert "priced_from_the_sharp_moneyline" not in " ".join(quote.flags)

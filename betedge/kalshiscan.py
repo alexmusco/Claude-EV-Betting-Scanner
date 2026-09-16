@@ -49,7 +49,20 @@ _THRESHOLD = re.compile(
     re.I,
 )
 _MARGIN_WORDS = ("margin", "win by", "beat", "by more than", "spread",
-                 "cover")
+                 "cover", "win", "defeat")
+
+#: A market asking only who wins is a rung at zero: margin > 0. Worth
+#: recognising, because it may be ALL an exchange lists for a game, and
+#: a plain moneyline against a de-vigged sharp one is a perfectly good
+#: bet without any ladder at all.
+_WINNER_WORDS = ("win", "beat", "defeat", "victor")
+#: ...but only when nothing turns it into a different question. The
+#: futures words matter most: "Chiefs to win the AFC" would otherwise be
+#: priced as Thursday's moneyline, which is not slightly wrong.
+_NOT_A_WINNER = ("margin", "by more than", "spread", "total", "points",
+                 "score", "quarter", "half", "first", "series", "season",
+                 "afc", "nfc", "super bowl", "division", "conference",
+                 "championship", "playoff", "mvp", "award")
 
 
 @dataclass
@@ -84,6 +97,7 @@ class RungQuote:
     ev: float
     edge: float
     matchup: str = ""
+    favourite: str = ""
     sport: str = ""
     commence_time: str = ""
     maker: bool = False
@@ -94,6 +108,8 @@ class RungQuote:
         return self.contracts * self.price
 
     def describe(self) -> str:
+        if self.threshold == 0.0:
+            return f"{self.matchup}: {self.favourite or 'favourite'} to win"
         return f"{self.matchup}: margin over {self.threshold:g}"
 
 
@@ -286,7 +302,8 @@ def collect_game_markets(client, lines, series_ticker=None, max_pages=25):
 # ---------------------------------------------------------------------------
 
 
-def parse_rung(market, favourite: str) -> tuple[float | None, str]:
+def parse_rung(market, favourite: str,
+               opponent: str = "") -> tuple[float | None, str]:
     """
     The threshold a market is about, and which side of the game it is on.
 
@@ -309,6 +326,24 @@ def parse_rung(market, favourite: str) -> tuple[float | None, str]:
 
     numbers = re.findall(r"-?\d{1,3}(?:\.5)?", title)
     if not numbers:
+        # "Will the Lions beat the Bills?" is a rung at zero. It carries
+        # no number because it does not need one, and refusing it would
+        # skip the only market many games have.
+        if any(w in lowered for w in _WINNER_WORDS) and \
+                not any(w in lowered for w in _NOT_A_WINNER):
+            if not matching.find_team(title, favourite):
+                return None, "the title does not say which team it is about"
+            # BOTH teams, because a game names two and a futures market
+            # names one. "Chiefs to win the AFC" is not this Thursday's
+            # moneyline, and pricing it as one would be catastrophic
+            # rather than merely wrong. The word list above is a second
+            # line; this is the principled check.
+            if opponent and not matching.find_team(title, opponent):
+                return None, (
+                    "names one team only -- a game market names both, so "
+                    "this is probably a futures or season-long market"
+                )
+            return 0.0, ""
         return None, "no threshold in the title"
     if len(set(numbers)) > 1:
         # Two numbers is a band ("by 7 to 13"), which is a different
@@ -352,7 +387,8 @@ def price_rungs(
     quotes, skipped = [], []
 
     for market in markets:
-        threshold, problem = parse_rung(market, line.favourite)
+        opponent = _opponent(line)
+        threshold, problem = parse_rung(market, line.favourite, opponent)
         if threshold is None:
             skipped.append((market, problem))
             continue
@@ -367,7 +403,16 @@ def price_rungs(
             skipped.append((market, "nothing offered"))
             continue
 
-        fair = model.prob_margin_over(threshold)
+        if threshold == 0.0:
+            # The one rung the sharp book prices DIRECTLY. Its de-vigged
+            # moneyline is a better estimate of who wins than anything
+            # this model produces, and using the model here would mean
+            # disagreeing with the sharpest number on the board for no
+            # reason. The model exists for the rungs Pinnacle does NOT
+            # quote; this is not one of them.
+            fair = line.fair_win_prob
+        else:
+            fair = model.prob_margin_over(threshold)
         fee = kalshi.fee_for(fillable, price, maker, kc)
         cost = fillable * price + fee
         if cost <= 0:
@@ -376,6 +421,8 @@ def price_rungs(
         ev = (fair * fillable - cost) / cost
 
         flags = list(model.flags)
+        if threshold == 0.0:
+            flags = ["priced_from_the_sharp_moneyline_not_the_margin_model"]
         if fillable < kc.depth_contracts:
             # Not a failure, but it changes what the number means: this
             # is the EV of a smaller position than was asked for.
@@ -385,11 +432,19 @@ def price_rungs(
             ticker=market.ticker, title=getattr(market, "title", ""),
             threshold=threshold, fair=fair, price=price,
             contracts=fillable, ev=ev, edge=fair - price,
-            matchup=line.matchup, sport=sport,
+            matchup=line.matchup, favourite=line.favourite,
+            sport=sport,
             commence_time=str(line.event.get("commence_time") or ""),
             maker=maker, flags=flags,
         ))
     return quotes, skipped
+
+
+def _opponent(line) -> str:
+    """The team in this game that is not the favourite."""
+    home = line.event.get("home_team") or ""
+    away = line.event.get("away_team") or ""
+    return away if line.favourite == home else home
 
 
 def _pays_maker_fee(ticker: str, kc) -> bool:
