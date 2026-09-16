@@ -338,3 +338,115 @@ class TestYamlOutput:
         existing = T.ContractBook.load(path)
         again = D.to_yaml(proposals, existing=existing)
         assert "KXRTSCORE-26-RE-T60" not in again
+
+
+# --------------------------------------------------------------------------
+# The sweep, and saying honestly what was looked at
+# --------------------------------------------------------------------------
+
+
+class EventClient:
+    """A client whose events endpoint works."""
+
+    def __init__(self, events, markets=None):
+        self._events = events
+        self._markets = markets or []
+        self.requests_made = 0
+        self.markets_called = False
+
+    def events(self, **kw):
+        return self._events
+
+    def markets(self, **kw):
+        self.markets_called = True
+        return self._markets
+
+
+class NoEventsClient(EventClient):
+    def events(self, **kw):
+        raise RuntimeError("no such endpoint")
+
+
+def event(title, markets):
+    return {"title": title, "markets": markets}
+
+
+class TestSweep:
+    def test_the_event_title_is_carried_down_into_its_markets(self):
+        # A market's own subtitle is often just "Above 60%". Without the
+        # event title there is no film name to look up at all.
+        client = EventClient([event(
+            "Resident Evil Tomatometer score",
+            [{"ticker": "KXRT-RE-T60", "subtitle": "Above 60%",
+              "status": "active"}],
+        )])
+        sweep = D.discover(client,
+                           fetcher_for({"resident_evil": "Resident Evil"}))
+        assert len(sweep) == 1
+        assert sweep[0].film == "Resident Evil"
+
+    def test_it_falls_back_to_the_flat_market_list(self):
+        client = NoEventsClient([], [market()])
+        sweep = D.discover(client,
+                           fetcher_for({"resident_evil": "Resident Evil"}))
+        assert client.markets_called
+        assert sweep.source == "markets"
+        assert len(sweep) == 1
+
+    def test_it_reports_what_it_looked_at(self):
+        client = EventClient([event("Fed decision", [
+            {"ticker": "FED-1", "subtitle": "Cut", "status": "active"}
+        ])])
+        sweep = D.discover(client, fetcher_for({}))
+        assert len(sweep) == 0
+        assert sweep.markets_seen == 1
+        assert sweep.events_seen == 1
+
+    def test_a_truncated_sweep_says_so(self):
+        # Not finding something in a complete sweep and not finding it in
+        # a partial one are different answers. The first version of this
+        # gave the confident one after seeing a twentieth of Kalshi.
+        events = [event(f"E{i}", []) for i in range(400)]
+        sweep = D.discover(EventClient(events), fetcher_for({}), max_pages=2)
+        assert sweep.truncated is True
+
+    def test_a_complete_sweep_does_not(self):
+        sweep = D.discover(EventClient([event("E", [])]), fetcher_for({}),
+                           max_pages=25)
+        assert sweep.truncated is False
+
+    def test_a_malformed_nested_market_does_not_lose_the_event(self):
+        client = EventClient([event("Resident Evil Tomatometer", [
+            {"junk": True},
+            {"ticker": "KXRT-RE-T60", "subtitle": "Above 60%",
+             "status": "active"},
+        ])])
+        sweep = D.discover(client,
+                           fetcher_for({"resident_evil": "Resident Evil"}))
+        assert len(sweep) == 1
+
+
+class TestGrep:
+    def test_it_finds_markets_by_title(self):
+        client = EventClient([
+            event("Resident Evil Tomatometer score",
+                  [{"ticker": "KXRTSCORE-RE-T60", "subtitle": "Above 60%",
+                    "status": "active"}]),
+            event("Fed decision",
+                  [{"ticker": "FED-1", "subtitle": "Cut", "status": "active"}]),
+        ])
+        hits = D.grep_titles(client, "tomato")
+        assert len(hits) == 1
+        assert hits[0][0] == "KXRTSCORE"
+
+    def test_it_matches_the_ticker_too(self):
+        client = EventClient([event("Something", [
+            {"ticker": "KXTOMATO-1", "subtitle": "x", "status": "active"}
+        ])])
+        assert D.grep_titles(client, "tomato")
+
+    def test_no_match_is_an_empty_list_not_an_error(self):
+        client = EventClient([event("Fed", [
+            {"ticker": "FED-1", "subtitle": "Cut", "status": "active"}
+        ])])
+        assert D.grep_titles(client, "tomato") == []

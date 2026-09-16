@@ -266,6 +266,97 @@ def confirm_slug(
     return "", False, problems
 
 
+@dataclass
+class Sweep:
+    """What a run actually looked at, so 'found nothing' is informative."""
+
+    proposals: list = field(default_factory=list)
+    markets_seen: int = 0
+    events_seen: int = 0
+    source: str = "events"
+    #: True when paging stopped at its cap rather than at the end of the
+    #: exchange. "Nothing found" means something quite different then --
+    #: the first version of this reported no markets after seeing about a
+    #: twentieth of Kalshi, and said so in a way that sounded conclusive.
+    truncated: bool = False
+
+    def __iter__(self):
+        return iter(self.proposals)
+
+    def __len__(self):
+        return len(self.proposals)
+
+    def __getitem__(self, index):
+        return self.proposals[index]
+
+
+def _market_with_event_title(raw: dict, event_title: str):
+    """Parse a nested market, carrying its event's title down into it."""
+    from .kalshi import parse_market
+
+    market = parse_market(raw)
+    if event_title and event_title.lower() not in (market.title or "").lower():
+        # A market's own subtitle is often just "Above 60%": the film name
+        # lives on the event. Without this the film cannot be identified.
+        object.__setattr__(
+            market, "title", f"{event_title} {market.title}".strip()
+        )
+    return market
+
+
+def collect_markets(client, series_ticker=None, status="open", max_pages=25):
+    """
+    Every market worth examining, and how the sweep went.
+
+    Prefers the events endpoint. Kalshi has far more markets than events,
+    so paging events covers much more of the exchange per request, and an
+    event title carries the film name where a market subtitle may carry
+    only a threshold. Falls back to the flat market list.
+    """
+    try:
+        events = client.events(series_ticker=series_ticker, status=status,
+                               max_pages=max_pages)
+    except Exception:  # noqa: BLE001
+        events = None
+
+    if events:
+        markets = []
+        for event in events:
+            title = event.get("title") or event.get("sub_title") or ""
+            for raw in event.get("markets") or []:
+                try:
+                    markets.append(_market_with_event_title(dict(raw), title))
+                except Exception:  # noqa: BLE001
+                    continue
+        return markets, len(events), "events", len(events) >= max_pages * 200
+
+    flat = client.markets(series_ticker=series_ticker, status=status,
+                          limit=1000, max_pages=max_pages)
+    return flat, 0, "markets", len(flat) >= max_pages * 1000
+
+
+def grep_titles(client, text: str, status: str | None = "open",
+                max_pages: int = 25):
+    """
+    Every market whose title mentions `text`, with its series ticker.
+
+    For finding where on the exchange a kind of market lives. "Found
+    nothing" is a far better answer when you can go looking yourself
+    rather than being told to check the app.
+    """
+    wanted = (text or "").lower()
+    markets, _events, _source, _truncated = collect_markets(
+        client, status=status, max_pages=max_pages
+    )
+    hits = set()
+    for market in markets:
+        blob = f"{market.title} {market.subtitle} {market.ticker}".lower()
+        if wanted in blob:
+            series = market.ticker.split("-")[0] if market.ticker else ""
+            hits.add((series, market.ticker, market.title[:70]))
+    return sorted(hits)
+
+
 def discover(
     client,
     fetcher,
@@ -273,7 +364,8 @@ def discover(
     status: str | None = "open",
     limit_markets: int = 400,
     now: datetime | None = None,
-) -> list[Proposal]:
+    max_pages: int = 25,
+) -> "Sweep":
     """
     Find Rotten Tomatoes markets on Kalshi and propose contract rows.
 
@@ -283,8 +375,12 @@ def discover(
     against a live response.
     """
     now = now or datetime.now(timezone.utc)
-    markets = client.markets(series_ticker=series_ticker, status=status,
-                             limit=min(limit_markets, 1000))
+    markets, events_seen, source, truncated = collect_markets(
+        client, series_ticker=series_ticker, status=status,
+        max_pages=max_pages,
+    )
+    sweep = Sweep(markets_seen=len(markets), events_seen=events_seen,
+                  source=source, truncated=truncated)
     proposals: list[Proposal] = []
     slug_cache: dict[str, tuple[str, bool, list[str]]] = {}
 
@@ -323,7 +419,30 @@ def discover(
             slug_confirmed=confirmed, close_time=market.close_time,
             problems=problems,
         ))
-    return proposals
+    sweep.proposals = proposals
+    return sweep
+
+
+def grep_titles(client, text: str, status: str | None = "open",
+                max_pages: int = 25) -> list[tuple[str, str, str]]:
+    """
+    Every market whose title mentions `text`, with its series.
+
+    For finding where on the exchange a kind of market lives. "Nothing
+    found" is a far better answer when you can go looking yourself rather
+    than being told to go check the app.
+    """
+    wanted = (text or "").lower()
+    markets, _seen, _source, _truncated = collect_markets(
+        client, status=status, max_pages=max_pages
+    )
+    hits = []
+    for market in markets:
+        blob = f"{market.title} {market.subtitle} {market.ticker}".lower()
+        if wanted in blob:
+            series = market.ticker.split("-")[0] if market.ticker else ""
+            hits.append((series, market.ticker, market.title))
+    return sorted(set(hits))
 
 
 _TRAILING_QUESTION = re.compile(

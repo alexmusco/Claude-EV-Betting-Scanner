@@ -830,6 +830,30 @@ def cmd_rt_discover(cfg: Config, args) -> int:
     def fetcher(slug):
         return rtfetch.fetch(slug, cache_dir=args.cache)
 
+    if args.grep:
+        # Finding where a kind of market lives on the exchange. Better
+        # than being told to go look in the app.
+        try:
+            hits = rtdiscover.grep_titles(
+                client, args.grep, status=None if args.all else "open"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not reach Kalshi: {exc}")
+            return 1
+        if not hits:
+            print(f"Nothing on the exchange mentions {args.grep!r}.")
+            print(f"({client.requests_made} request(s) made.)")
+            return 0
+        print(f"{len(hits)} market(s) mentioning {args.grep!r}:\n")
+        print(f"{'series':<16} {'ticker':<34} title")
+        for series, ticker, title in hits[:60]:
+            print(f"{series:<16} {ticker:<34} {title}")
+        series_seen = sorted({h[0] for h in hits if h[0]})
+        if series_seen:
+            print(f"\nSeries: {', '.join(series_seen)}")
+            print(f"Try:  betedge rt discover --series {series_seen[0]}")
+        return 0
+
     try:
         proposals = rtdiscover.discover(
             client, fetcher, series_ticker=args.series,
@@ -840,10 +864,23 @@ def cmd_rt_discover(cfg: Config, args) -> int:
         return 1
 
     if not proposals:
-        print("No Rotten Tomatoes markets found"
-              + (f" under series {args.series}." if args.series else "."))
-        print("\nKalshi moves series tickers around. Find one RT market in "
-              "the app, and pass its series with --series.")
+        where = f" under series {args.series}" if args.series else ""
+        print(f"No Rotten Tomatoes markets found{where}.")
+        print(f"\nScanned {proposals.markets_seen:,} market(s)"
+              + (f" across {proposals.events_seen:,} event(s)"
+                 if proposals.events_seen else "")
+              + f" via the {proposals.source} endpoint.")
+        if proposals.truncated:
+            # The distinction that matters: not finding something in a
+            # complete sweep and not finding it in a partial one are
+            # different answers, and the first version gave the confident
+            # one after seeing about a twentieth of the exchange.
+            print("That hit the paging cap, so it is NOT the whole "
+                  "exchange -- 'not there' is not established.")
+        print("\nFind where they live:\n\n"
+              "    betedge rt discover --grep tomato\n"
+              "    betedge rt discover --grep 'rotten'\n\n"
+              "then pass the series it prints with --series.")
         print(f"({client.requests_made} request(s) made.)")
         return 0
 
@@ -2123,6 +2160,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "This un-verifies everything already in it")
     s.add_argument("--all", action="store_true",
                    help="include closed and settled markets")
+    s.add_argument("--grep", metavar="TEXT",
+                   help="instead of discovering, print every market whose "
+                        "title mentions TEXT, with its series. For finding "
+                        "where a kind of market lives on the exchange")
     s.add_argument("--cache", metavar="DIR", help="where to cache RT pages")
     s.add_argument("--base-url", dest="base_url", metavar="URL",
                    help="Kalshi API base. They have moved it before, "
