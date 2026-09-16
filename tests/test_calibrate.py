@@ -258,3 +258,69 @@ class TestTheShippedNflPriors:
             p = model.prob_margin_over(threshold)
             assert p <= previous + 1e-12
             previous = p
+
+
+class TestComparingWithWhatIsLoaded:
+    """
+    A calibration run that always ends "paste this in" hands you work
+    that is already done, and after the second time you stop reading the
+    output. So it has to know when there is nothing to say.
+    """
+
+    @pytest.fixture
+    def measured(self):
+        return C.calibrate(games(n=4000))
+
+    def test_a_matching_file_produces_no_differences(self, measured, tmp_path):
+        path = tmp_path / "priors.yaml"
+        path.write_text("sports:\n" + C.to_yaml_block(measured))
+        prior = L.PriorSet.load(path).get("americanfootball_nfl")
+        assert C.compare_with(measured, prior) == []
+
+    def test_the_shipped_nfl_priors_match_a_fresh_measurement(self):
+        """
+        The end-to-end check: re-measuring from nflverse must reproduce
+        what is committed. If this ever fails, either the upstream data
+        moved or the committed numbers were edited by hand.
+        """
+        import os
+
+        source = "/home/user/nflverse/nfldata/data/games.csv"
+        if not os.path.exists(source):
+            pytest.skip("nflverse checkout not present")
+        fresh = C.calibrate(C.read_nflverse_games(source))
+        prior = L.PriorSet.load().get("americanfootball_nfl")
+        assert C.compare_with(fresh, prior) == []
+
+    def test_a_changed_sigma_is_reported(self, measured, tmp_path):
+        path = tmp_path / "priors.yaml"
+        path.write_text(
+            ("sports:\n" + C.to_yaml_block(measured))
+            .replace(f"sigma_measured: {measured.sigma:g}",
+                     "sigma_measured: 9.5")
+        )
+        prior = L.PriorSet.load(path).get("americanfootball_nfl")
+        differences = C.compare_with(measured, prior)
+        assert any("sigma" in d for d in differences)
+
+    def test_an_unverified_file_is_reported(self, measured, tmp_path):
+        path = tmp_path / "priors.yaml"
+        path.write_text(("sports:\n" + C.to_yaml_block(measured))
+                        .replace("verified: true", "verified: false"))
+        prior = L.PriorSet.load(path).get("americanfootball_nfl")
+        assert any("unverified" in d for d in C.compare_with(measured, prior))
+
+    def test_a_missing_sport_is_reported(self, measured):
+        assert C.compare_with(measured, None) == [
+            "americanfootball_nfl is not in the priors file at all"
+        ]
+
+    def test_a_new_key_number_is_named(self, measured, tmp_path):
+        path = tmp_path / "priors.yaml"
+        body = "sports:\n" + C.to_yaml_block(measured)
+        margin = sorted(measured.key_numbers)[0]
+        bump = measured.key_numbers[margin]
+        path.write_text(body.replace(f"      {int(margin)}: {bump:g}\n", "", 1))
+        prior = L.PriorSet.load(path).get("americanfootball_nfl")
+        differences = C.compare_with(measured, prior)
+        assert any(f"margin {margin:g}: new" in d for d in differences)

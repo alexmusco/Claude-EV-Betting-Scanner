@@ -915,7 +915,18 @@ def cmd_kalshi_calibrate(cfg: Config, args) -> int:
               "reproduces a moneyline is not the one describing how far "
               "results land\nfrom the line. See calibrate.py.\n")
 
-    print("Paste this into betedge/data/margin_priors.yaml (or your own "
+    from . import ladder as L
+
+    differences = C.compare_with(result, L.PriorSet.load().get(args.sport))
+    if not differences:
+        print("The shipped priors already match this measurement exactly. "
+              "Nothing to do.")
+        return 0
+
+    print("This differs from what is loaded:")
+    for difference in differences:
+        print(f"  {difference}")
+    print("\nPaste this into betedge/data/margin_priors.yaml (or your own "
           "copy):\n")
     print(C.to_yaml_block(result, today=datetime.now().strftime("%Y-%m-%d")))
     return 0

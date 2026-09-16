@@ -329,6 +329,43 @@ def calibrate(games, sport: str = "americanfootball_nfl") -> Calibration:
 # ---------------------------------------------------------------------------
 
 
+def compare_with(result: Calibration, prior) -> list[str]:
+    """
+    How a fresh measurement differs from what is already loaded.
+
+    Empty means the shipped file is up to date, which is the common case
+    and deserves to be SAID: a calibration run that always ends "paste
+    this in" hands you work that is already done, and after the second
+    time you stop reading the output.
+    """
+    if prior is None:
+        return [f"{result.sport} is not in the priors file at all"]
+    differences = []
+    if not prior.verified:
+        differences.append("the loaded priors are still marked unverified")
+    if not prior.sigma_measured:
+        differences.append("the loaded priors have no measured sigma")
+    elif abs(prior.sigma_measured - result.sigma) > 0.05:
+        differences.append(
+            f"sigma {prior.sigma_measured:g} loaded against "
+            f"{result.sigma:g} measured"
+        )
+    loaded = {float(k): round(float(v), 3)
+              for k, v in (prior.key_numbers or {}).items()}
+    fresh = {float(k): round(float(v), 3) for k, v in result.key_numbers.items()}
+    for margin in sorted(set(loaded) | set(fresh)):
+        was, now = loaded.get(margin), fresh.get(margin)
+        if was is None:
+            differences.append(f"margin {margin:g}: new, {now:+.0%}")
+        elif now is None:
+            differences.append(f"margin {margin:g}: gone, was {was:+.0%}")
+        elif abs(was - now) > 0.02:
+            differences.append(
+                f"margin {margin:g}: {was:+.0%} loaded, {now:+.0%} measured"
+            )
+    return differences
+
+
 def to_yaml_block(result: Calibration, today: str = "") -> str:
     """One sport's measured priors, as YAML ready to paste or write."""
     band = 0.35 * result.sigma
