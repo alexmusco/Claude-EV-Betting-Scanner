@@ -395,5 +395,54 @@ parlay:
   # before any feed does. Optional -- the layers above cover most of it.
   # rosters_path: data/rosters.csv
 
+# ===========================================================================
+# NOTIFICATIONS
+#
+# A scan you have to be sitting at is a scan that finds edges after they
+# have decayed. Turn this on and the playable bets go to your phone.
+#
+# Try it before wiring up a schedule -- debugging a silent cron job is
+# miserable:
+#
+#     bet notify test
+#
+# THE NTFY TOPIC IS THE ENTIRE SECRET. There is no account and no key:
+# anyone who learns the topic can read your alerts and send you their
+# own. Make it long and random, and put nothing in a message you would
+# mind a stranger reading. Better still, keep it out of this file
+# entirely -- the environment wins over what is written here:
+#
+#     export BETEDGE_NTFY_TOPIC="..."
+#
+# Install the ntfy app, subscribe to the topic, and the test arrives.
+# ===========================================================================
+notify:
+  enabled: false
+  provider: ntfy            # ntfy | pushover | telegram
+  ntfy_topic: ""            # or BETEDGE_NTFY_TOPIC
+  # ntfy_server: https://ntfy.sh
+
+  # Higher than the scan's own bar on purpose. A terminal can afford to
+  # show you a marginal play next to its flags; a phone cannot.
+  min_ev: 0.03
+  # Beyond this many, one digest instead. A phone that vibrates nine
+  # times gets silenced, and then the tenth is not seen either.
+  max_messages: 4
+
+  # Do not repeat the same bet until this long has passed...
+  resend_after_hours: 12.0
+  # ...unless the price improved by at least this much, which makes it
+  # materially a different bet from the one already described.
+  resend_on_price_gain: 0.05
+
+  # Local clock, 24h, wrapping midnight. A run inside the window says so
+  # rather than silently sending nothing.
+  quiet_start: "23:00"
+  quiet_end: "08:00"
+
+  # Do not bother sending a bet you could not reach your phone, open the
+  # app and place in time.
+  min_minutes_to_start: 10.0
+
 database: data/betedge.db
 reports_dir: reports
