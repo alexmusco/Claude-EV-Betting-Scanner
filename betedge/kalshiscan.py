@@ -36,6 +36,7 @@ even when the fit fails.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -111,6 +112,9 @@ class GameResult:
 @dataclass
 class ScanResult:
     games: list[GameResult] = field(default_factory=list)
+    #: Which Kalshi series the matched games came from, so a run can say
+    #: where to narrow to instead of leaving it to be guessed.
+    series: Counter = field(default_factory=Counter)
     unmatched: list[tuple] = field(default_factory=list)
     markets_seen: int = 0
     events_seen: int = 0
@@ -209,6 +213,60 @@ def _market(book, key):
         if market.get("key") == key:
             return market
     return None
+
+
+def collect_game_markets(client, lines, series_ticker=None, max_pages=25):
+    """
+    Kalshi markets that name a team we have a line for.
+
+    Sweeps EVENTS rather than the flat market list. Kalshi has tens of
+    thousands of markets and only a handful are the games on today's
+    board, so paging `/markets` and taking the first thousand returns a
+    thousand irrelevant ones -- which is exactly what the first version
+    of this did, then reported "0 games priced" as though the exchange
+    had nothing.
+
+    An event title carries the team names; a market's own subtitle is
+    often just a threshold. So the event title is carried down into each
+    of its markets, without which nothing could be identified at all.
+
+    Returns (markets, series_counts) -- the second so a run can SAY where
+    the games it found live, rather than leaving the operator to guess a
+    series ticker.
+    """
+    from .kalshi import parse_market
+
+    teams = set()
+    for line in lines:
+        for side in ("home_team", "away_team"):
+            name = line.event.get(side)
+            if name:
+                teams.add(name)
+
+    try:
+        events = client.events(series_ticker=series_ticker, status="open",
+                               max_pages=max_pages)
+    except Exception:  # noqa: BLE001
+        events = []
+
+    found, series = [], Counter()
+    for event in events:
+        title = event.get("title") or event.get("sub_title") or ""
+        if not any(matching.find_team(title, team) for team in teams):
+            continue
+        for raw in event.get("markets") or []:
+            raw = dict(raw)
+            own = raw.get("title") or ""
+            if title and title.lower() not in own.lower():
+                raw["title"] = f"{title} {own}".strip()
+            try:
+                market = parse_market(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            found.append(market)
+            if market.ticker:
+                series[market.ticker.split("-")[0]] += 1
+    return found, series
 
 
 # ---------------------------------------------------------------------------

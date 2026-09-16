@@ -8,6 +8,7 @@ than it is, which makes sigma come out too small, which understates every
 outer rung -- exactly where this scan is looking.
 """
 
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -322,3 +323,91 @@ class TestCoherenceFromMarkets:
         markets = [FakeMarket("A", "Chiefs win by 7 to 13")]
         books = {"A": book(no_bids=[[60, 100]], yes_bids=[[37, 100]])}
         assert KS.rungs_for_coherence(markets, books) == []
+
+
+class TestCollectGameMarkets:
+    """
+    The targeting bug, and why it was worth a module change.
+
+    The first version paged Kalshi's flat market list and took the first
+    thousand. Kalshi has tens of thousands of markets and only a handful
+    are today's games, so it came back with a thousand movie contracts
+    and reported "0 games priced" as though the exchange had nothing to
+    offer.
+    """
+
+    class Client:
+        def __init__(self, events):
+            self._events = events
+            self.requests_made = 0
+
+        def events(self, **kw):
+            return self._events
+
+        def markets(self, **kw):  # pragma: no cover - must not be used
+            raise AssertionError("the flat market list is the wrong pool")
+
+    def event(self, title, tickers):
+        return {"title": title, "markets": [
+            {"ticker": t, "subtitle": "Above 6.5", "status": "active"}
+            for t in tickers
+        ]}
+
+    @pytest.fixture
+    def lines(self):
+        return KS.game_lines([odds_event()])
+
+    def test_it_keeps_only_markets_naming_a_game_we_have_a_line_for(
+        self, lines
+    ):
+        client = self.Client([
+            self.event("Chiefs vs Broncos: winning margin",
+                       ["KXNFLSPREAD-1", "KXNFLSPREAD-2"]),
+            self.event("Best Picture winner", ["KXOSCARPIC-1"]),
+            self.event("Will the Fed cut rates?", ["KXFED-1"]),
+        ])
+        markets, series = KS.collect_game_markets(client, lines)
+        assert [m.ticker for m in markets] == ["KXNFLSPREAD-1",
+                                               "KXNFLSPREAD-2"]
+        assert series == {"KXNFLSPREAD": 2}
+
+    def test_it_reports_which_series_the_games_live_in(self, lines):
+        # So a narrowed re-run is a command rather than a guess.
+        client = self.Client([
+            self.event("Chiefs vs Broncos margin", ["KXNFLSPREAD-1"]),
+            self.event("Chiefs vs Broncos total", ["KXNFLTOTAL-1"]),
+        ])
+        _markets, series = KS.collect_game_markets(client, lines)
+        assert dict(series) == {"KXNFLSPREAD": 1, "KXNFLTOTAL": 1}
+
+    def test_the_event_title_is_carried_into_each_market(self, lines):
+        # A market's own subtitle is often just a threshold. Without the
+        # event title there is no team name to match on at all, which is
+        # the other half of why nothing joined.
+        client = self.Client([
+            self.event("Chiefs vs Broncos margin", ["KXNFLSPREAD-1"]),
+        ])
+        (market,), _series = KS.collect_game_markets(client, lines)
+        assert "Chiefs" in market.title and "Broncos" in market.title
+
+    def test_an_unrelated_board_yields_nothing_rather_than_noise(self, lines):
+        client = self.Client([self.event("Best Picture", ["KXOSCARPIC-1"])])
+        markets, series = KS.collect_game_markets(client, lines)
+        assert markets == [] and not series
+
+    def test_a_malformed_market_does_not_lose_its_event(self, lines):
+        client = self.Client([{
+            "title": "Chiefs vs Broncos margin",
+            "markets": [{"junk": True},
+                        {"ticker": "KXNFLSPREAD-2", "subtitle": "Above 6.5",
+                         "status": "active"}],
+        }])
+        markets, _series = KS.collect_game_markets(client, lines)
+        assert [m.ticker for m in markets] == ["KXNFLSPREAD-2"]
+
+    def test_an_unreachable_events_endpoint_is_not_fatal(self, lines):
+        class Broken(self.Client):
+            def events(self, **kw):
+                raise RuntimeError("nope")
+
+        assert KS.collect_game_markets(Broken([]), lines) == ([], Counter())

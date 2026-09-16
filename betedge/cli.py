@@ -798,13 +798,19 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
             continue
 
         try:
-            markets = market_data.markets(series_ticker=args.series,
-                                          status="open")
+            markets, series_counts = KS.collect_game_markets(
+                market_data, lines, series_ticker=args.series
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"Could not reach Kalshi: {exc}")
             db.close()
             return 1
         result.markets_seen += len(markets)
+        result.series.update(series_counts)
+        if not markets:
+            print(f"{sport}: Kalshi lists nothing naming any of the "
+                  f"{len(lines)} game(s) {cfg.books.sharp} prices.")
+            continue
 
         matched, unmatched = matching.match_markets(
             markets, [ln.event for ln in lines]
@@ -963,6 +969,13 @@ def _print_kalshi(result, cfg, args) -> None:
     print(f"\n{len(result.games)} game(s) priced, "
           f"{len(result.quotes)} rung(s) quoted, "
           f"{len(result.unmatched)} market(s) unmatched.")
+    if result.series:
+        # Where the games actually live, so a narrowed re-run is a
+        # command rather than a guess.
+        top = result.series.most_common(6)
+        print("\nSeries carrying these games: "
+              + ", ".join(f"{name} ({n})" for name, n in top))
+        print(f"Narrow to one with:  betedge kalshi scan --series {top[0][0]}")
     if result.unmatched and args.show_unmatched:
         print("\nCould not be joined to a game:")
         seen = set()
