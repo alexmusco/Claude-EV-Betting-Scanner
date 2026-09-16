@@ -1,0 +1,132 @@
+# ===========================================================================
+# MARGIN PRIORS
+#
+# What is known about a sport's margins before looking at any one game.
+# Used to price every rung of a Kalshi ladder from Pinnacle's main line.
+#
+# READ THIS BEFORE TRUSTING A LADDER PRICE.
+#
+# These are PRIORS, not measurements. They are written from recollection
+# of well-known distributional facts, and they have NOT been fitted to a
+# dataset. Everything here ships `verified: false`, and the flag rides
+# along on every model built from it.
+#
+# ---------------------------------------------------------------------------
+# WHAT EACH FIELD IS FOR
+#
+# sigma_typical   Used ONLY when a moneyline is unavailable, or when the
+#                 game is a pick'em and sigma is therefore unidentified.
+#                 Normally sigma is SOLVED from the spread and the
+#                 de-vigged moneyline together, not taken from here.
+#
+# sigma_low       A plausibility band, not an estimate. Its job is to
+# sigma_high      catch inputs that disagree with each other -- a stale
+#                 moneyline, a mismatched event, a spread read off the
+#                 wrong side -- by flagging a fitted sigma that lands
+#                 outside what the sport produces. Keep them WIDE. A band
+#                 that is too narrow turns ordinary games into warnings
+#                 and teaches you to ignore the flag.
+#
+# key_numbers     Extra probability mass sitting EXACTLY on a margin, as
+#                 a fraction. A normal distribution spreads that mass
+#                 smoothly, so a rung sitting on a key number is
+#                 underpriced by a plain fit and its neighbours are
+#                 overpriced -- which is exactly the error that makes an
+#                 outer rung look mispriced when it is not.
+#
+#                 Only whole numbers matter: a rung at 3.5 cannot land on
+#                 three, so the lump is already on the right side of it.
+#
+# HOW TO VERIFY
+#
+# Take a few seasons of final scores, histogram the margins, and read the
+# frequencies off. That turns each number below from a recollection into
+# a measurement -- at which point set `verified: true` and record what
+# you fitted it from in `note`.
+# ===========================================================================
+
+meta:
+  version: 1
+  last_verified_by_user: null
+
+sports:
+
+  # -----------------------------------------------------------------------
+  # NFL. The lumpiest of the four by a distance, because scores move in
+  # threes and sevens. Margins of 3 and 7 are far more common than their
+  # neighbours, which is why a plain normal misprices rungs sitting on
+  # them and why the half-point either side of a key number is worth so
+  # much more than any other half-point on the board.
+  # -----------------------------------------------------------------------
+  americanfootball_nfl:
+    sigma_typical: 13.5
+    sigma_low: 9.0
+    sigma_high: 18.0
+    total_sigma: 10.5
+    verified: false
+    key_numbers:
+      3: 0.09
+      7: 0.055
+      10: 0.035
+      14: 0.025
+      6: 0.030
+      4: 0.025
+    note: >-
+      Recollection of the standard picture, NOT fitted. The 3 and 7 lumps
+      are the well-attested ones; the rest are smaller and less certain.
+      Verify against a few seasons of final scores before staking on a
+      rung that sits on one.
+
+  # -----------------------------------------------------------------------
+  # NBA. Much smoother -- scoring is near-continuous, so margins have no
+  # meaningful lumps and a normal is a reasonable shape.
+  # -----------------------------------------------------------------------
+  basketball_nba:
+    sigma_typical: 11.5
+    sigma_low: 8.0
+    sigma_high: 16.0
+    total_sigma: 13.0
+    verified: false
+    key_numbers: {}
+    note: >-
+      No key numbers: basketball scoring is frequent enough that margins
+      do not pile up anywhere in particular.
+
+  # -----------------------------------------------------------------------
+  # MLB. Low-scoring and discrete, so a normal is a poor fit at the
+  # centre -- a one-run game is far more common than a smooth curve
+  # implies, and there is no such thing as a margin of zero. The band is
+  # wide because the shape is wrong, not because the variance is unknown.
+  # -----------------------------------------------------------------------
+  baseball_mlb:
+    sigma_typical: 4.4
+    sigma_low: 2.5
+    sigma_high: 7.0
+    total_sigma: 4.2
+    verified: false
+    key_numbers:
+      1: 0.11
+      2: 0.05
+    note: >-
+      A normal is a poor shape here. Prefer the main line, and treat any
+      ladder rung inside two runs with suspicion -- the model is being
+      asked to do something it is not built for.
+
+  # -----------------------------------------------------------------------
+  # NHL. The most discrete of all: a huge share of games are decided by
+  # one goal, and the empty-net goal puts an artificial lump on two. A
+  # normal is close to meaningless at these thresholds.
+  # -----------------------------------------------------------------------
+  icehockey_nhl:
+    sigma_typical: 2.2
+    sigma_low: 1.4
+    sigma_high: 3.5
+    total_sigma: 2.4
+    verified: false
+    key_numbers:
+      1: 0.22
+      2: 0.10
+    note: >-
+      One-goal games dominate and empty-net goals inflate two. Ladder
+      rungs here are barely a distribution question at all; the counts
+      matter more than the curve.
