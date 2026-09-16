@@ -141,7 +141,7 @@ class TestGameLines:
 class TestParseRung:
     def test_it_reads_a_threshold_from_the_title(self):
         market = FakeMarket("T", "Chiefs to beat the Broncos by more than 6.5")
-        threshold, problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold == 6.5
         assert problem == ""
 
@@ -149,18 +149,18 @@ class TestParseRung:
         # "by 7 to 13" is a different shape. Taking one of the numbers
         # would look exactly like it had worked.
         market = FakeMarket("T", "Chiefs win by 7 to 13")
-        threshold, problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold is None
         assert "more than one number" in problem
 
     def test_a_market_that_is_not_about_a_margin_is_refused(self):
         market = FakeMarket("T", "Chiefs total points over 24.5")
-        threshold, problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold is None
 
     def test_a_title_naming_neither_team_is_refused(self):
         market = FakeMarket("T", "Win by more than 6.5")
-        threshold, problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold is None
         assert "which team" in problem
 
@@ -169,12 +169,12 @@ class TestParseRung:
         # distribution read at a negative threshold -- but "might" is
         # not good enough when the sign flips the whole answer.
         market = FakeMarket("T", "Broncos to win by more than 3.5")
-        threshold, _problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, _problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold is None
 
     def test_an_absurd_threshold_is_refused(self):
         market = FakeMarket("T", "Chiefs win by more than 500")
-        threshold, problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold is None
         assert "not a margin" in problem
 
@@ -182,7 +182,7 @@ class TestParseRung:
         # Ticker formats are undocumented and change without notice, so
         # a parser built on one breaks silently.
         market = FakeMarket("KXNFL-T65", "Chiefs game")
-        threshold, _problem = KS.parse_rung(market, "Kansas City Chiefs")
+        threshold, _fav, _problem = KS.parse_rung(market, "Kansas City Chiefs")
         assert threshold is None
 
 
@@ -472,7 +472,7 @@ class TestTheMoneylineRung:
         "Will the Chiefs defeat the Broncos?",
     ])
     def test_a_winner_market_is_a_rung_at_zero(self, title):
-        threshold, problem = KS.parse_rung(
+        threshold, _fav, problem = KS.parse_rung(
             FakeMarket("T", title), "Kansas City Chiefs", "Denver Broncos"
         )
         assert threshold == 0.0
@@ -484,7 +484,7 @@ class TestTheMoneylineRung:
         "Chiefs first quarter winner",
     ])
     def test_something_else_is_not_mistaken_for_one(self, title):
-        threshold, _problem = KS.parse_rung(
+        threshold, _fav, _problem = KS.parse_rung(
             FakeMarket("T", title), "Kansas City Chiefs", "Denver Broncos"
         )
         assert threshold != 0.0
@@ -501,7 +501,7 @@ class TestTheMoneylineRung:
         slightly wrong, it is a different question entirely -- and the
         numbers would all look perfectly reasonable.
         """
-        threshold, problem = KS.parse_rung(
+        threshold, _fav, problem = KS.parse_rung(
             FakeMarket("T", title), "Kansas City Chiefs", "Denver Broncos"
         )
         assert threshold is None
@@ -510,11 +510,11 @@ class TestTheMoneylineRung:
     def test_a_game_names_both_teams_and_a_future_names_one(self):
         # The principled check behind the word list: two teams means a
         # game, one means something season-long.
-        game, _ = KS.parse_rung(
+        game, _fav, _p = KS.parse_rung(
             FakeMarket("T", "Will the Chiefs beat the Broncos?"),
             "Kansas City Chiefs", "Denver Broncos",
         )
-        future, problem = KS.parse_rung(
+        future, _fav2, problem = KS.parse_rung(
             FakeMarket("T", "Will the Chiefs win it all?"),
             "Kansas City Chiefs", "Denver Broncos",
         )
@@ -523,7 +523,7 @@ class TestTheMoneylineRung:
         assert "names one team only" in problem
 
     def test_it_still_has_to_say_which_team(self):
-        threshold, problem = KS.parse_rung(
+        threshold, _fav, problem = KS.parse_rung(
             FakeMarket("T", "Who will win?"), "Kansas City Chiefs",
             "Denver Broncos"
         )
@@ -567,3 +567,104 @@ class TestTheMoneylineRung:
         (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
         assert quote.fair == pytest.approx(model.prob_margin_over(9.5))
         assert "priced_from_the_sharp_moneyline" not in " ".join(quote.flags)
+
+
+class TestATeamNamedMarket:
+    """
+    Kalshi's KXNFLGAME lists each fixture ONCE PER TEAM. The event names
+    both, the market's own subtitle is just a team name -- no verb, no
+    number, nothing a word list would recognise. Requiring a winner word
+    refused all thirty-two markets on a live Week 3 board after the join
+    had already succeeded on all sixteen games.
+
+    The structure is the signal: the subtitle naming exactly one of the
+    two teams IS the side the contract pays on.
+    """
+
+    @pytest.fixture
+    def setup(self):
+        cfg = Config()
+        priors = L.PriorSet.load()
+        (line,) = KS.game_lines([odds_event()])
+        model = L.fit(line.spread, line.fair_win_prob,
+                      "americanfootball_nfl", priors)
+        return cfg, line, model
+
+    def market(self, team):
+        return FakeMarket(
+            "KXNFLGAME-26SEP17DENKC-X",
+            "Denver Broncos at Kansas City Chiefs",
+            subtitle=team,
+        )
+
+    def test_the_favourite_s_contract_is_read(self):
+        threshold, about_favourite, problem = KS.parse_rung(
+            self.market("Kansas City Chiefs"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        assert (threshold, about_favourite, problem) == (0.0, True, "")
+
+    def test_the_underdog_s_contract_is_read_as_the_other_side(self):
+        threshold, about_favourite, problem = KS.parse_rung(
+            self.market("Denver Broncos"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        assert (threshold, about_favourite, problem) == (0.0, False, "")
+
+    def test_the_underdog_is_priced_at_the_complement(self, setup):
+        """
+        Half these contracts pay on the UNDERDOG. Pricing them with the
+        favourite's probability would make every single one look like a
+        gift -- a 30% shot quoted as a 70% one.
+        """
+        cfg, line, model = setup
+        markets = [self.market("Denver Broncos")]
+        books = {markets[0].ticker: book(no_bids=[[60, 500]])}
+        (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert quote.fair == pytest.approx(1.0 - line.fair_win_prob)
+        assert quote.favourite == "Denver Broncos"
+
+    def test_the_favourite_is_priced_at_the_sharp_number(self, setup):
+        cfg, line, model = setup
+        markets = [self.market("Kansas City Chiefs")]
+        books = {markets[0].ticker: book(no_bids=[[40, 500]])}
+        (quote,), _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert quote.fair == pytest.approx(line.fair_win_prob)
+
+    def test_the_two_sides_are_complements_of_each_other(self, setup):
+        # The internal check: one game, two contracts, probabilities that
+        # sum to one. If they ever do not, a side has been mislabelled.
+        cfg, line, model = setup
+        markets = [self.market("Kansas City Chiefs"),
+                   self.market("Denver Broncos")]
+        books = {m.ticker: book(no_bids=[[50, 500]]) for m in markets}
+        quotes, _ = KS.price_rungs(model, line, markets, books, cfg)
+        assert len(quotes) == 2
+        assert sum(q.fair for q in quotes) == pytest.approx(1.0)
+
+    def test_a_subtitle_naming_both_teams_is_not_a_side(self):
+        # That is the event, not one team's contract.
+        threshold, _fav, problem = KS.parse_rung(
+            FakeMarket("T", "x", subtitle="Broncos at Chiefs"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        assert threshold is None
+
+    def test_a_subtitle_carrying_a_number_is_not_a_moneyline(self):
+        # "Chiefs by 7+" is a margin rung and must go down the other
+        # path, or the spread would be silently ignored.
+        threshold, _fav, _problem = KS.parse_rung(
+            FakeMarket("T", "Broncos at Chiefs", subtitle="Chiefs by 7"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        assert threshold != 0.0
+
+    def test_a_margin_rung_on_the_underdog_flips_its_threshold(self, setup):
+        # One distribution read at a different point: the underdog
+        # covering by 3 is the favourite's margin below -3.
+        cfg, line, model = setup
+        threshold, about_favourite, _ = KS.parse_rung(
+            FakeMarket("T", "Broncos at Chiefs", subtitle="Broncos by 3"),
+            "Kansas City Chiefs", "Denver Broncos",
+        )
+        assert about_favourite is False

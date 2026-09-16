@@ -1073,11 +1073,24 @@ def _print_kalshi(result, cfg, args) -> None:
             seen.add(match.reason)
             print(f"  {market.ticker}: {match.reason}")
     skipped = [(m, why) for g in result.games for m, why in g.skipped]
-    if skipped and args.show_skipped:
+    if skipped:
+        # Unconditionally, like the unmatched reasons. A run that prices
+        # sixteen games and quotes nothing has a diagnosis, and burying
+        # it behind a flag means the person who needs it is the one who
+        # does not know to ask.
+        from collections import Counter
+
+        reasons = Counter(why for _m, why in skipped)
         print("\nJoined but not priced:")
-        for market, why in skipped[:20]:
-            ticker = getattr(market, "ticker", "-")
-            print(f"  {ticker}: {why}")
+        for reason, count in reasons.most_common(6):
+            print(f"  {count:>4}  {reason}")
+        if args.show_skipped:
+            print()
+            for market, why in skipped[:20]:
+                ticker = getattr(market, "ticker", "-")
+                title = (getattr(market, "title", "") or "")[:64]
+                print(f"  {ticker:<30} {title}")
+                print(f"{'':<32} {why}")
     print(f"({result.credits} credit(s), {result.requests} Kalshi request(s))")
 
 

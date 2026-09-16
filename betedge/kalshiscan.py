@@ -303,26 +303,60 @@ def collect_game_markets(client, lines, series_ticker=None, max_pages=25):
 
 
 def parse_rung(market, favourite: str,
-               opponent: str = "") -> tuple[float | None, str]:
+               opponent: str = "") -> tuple[float | None, bool, str]:
     """
     The threshold a market is about, and which side of the game it is on.
 
-    Returns (threshold, problem). The threshold is expressed from the
-    FAVOURITE's perspective, so a market about the underdog covering
-    comes back negative -- one distribution, read at different points,
-    which is the whole reason for modelling the margin.
+    Returns (threshold, about_favourite, problem). The threshold is
+    expressed from the FAVOURITE's perspective, so a market about the
+    underdog covering comes back negative -- one distribution, read at
+    different points, which is the whole reason for modelling the margin.
+
+    `about_favourite` says which side of the game the market takes,
+    because on a two-outcome game series each fixture is listed TWICE,
+    once per team, and the underdog's contract is a perfectly good bet
+    that must not be priced with the favourite's probability.
 
     A title that does not clearly carry a threshold is refused. Falling
     back to the ticker would mean parsing a format that is undocumented,
     varies by series, and changes without notice.
     """
-    title = " ".join(filter(None, [
-        getattr(market, "subtitle", ""), getattr(market, "title", ""),
-    ]))
+    subtitle = getattr(market, "subtitle", "") or ""
+    title = " ".join(filter(None, [subtitle, getattr(market, "title", "")]))
     lowered = matching.normalise(title)
+
+    # A two-outcome game series lists each fixture once per team, and the
+    # market's own subtitle is just that team's name -- no verb, no
+    # number, nothing a word list would recognise. Kalshi's KXNFLGAME
+    # looks exactly like this, and requiring a winner word refused all
+    # thirty-two markets on a Week 3 board. The structure is the signal:
+    # the event names both teams, the subtitle names ONE, and that one is
+    # the side the contract pays on.
+    if subtitle and opponent:
+        names_fav = matching.find_team(subtitle, favourite)
+        names_dog = matching.find_team(subtitle, opponent)
+        if names_fav != names_dog:          # exactly one of them
+            digits = sorted(set(re.findall(r"-?\d{1,3}(?:\.5)?", subtitle)))
+            if not digits:
+                # "Kansas City Chiefs" -- a moneyline on that team.
+                return 0.0, names_fav, ""
+            if len(digits) == 1:
+                # "Chiefs by 7" -- a margin rung on that team. Read
+                # structurally rather than by looking for a verb, because
+                # a per-team subtitle has no room for one and a word list
+                # would need an entry for every phrasing a venue invents.
+                value = float(digits[0])
+                if abs(value) > 100:
+                    return None, True, f"threshold {value:g} is not a margin"
+                return abs(value), names_fav, ""
+            return None, True, (
+                f"more than one number in the subtitle "
+                f"({', '.join(digits)})"
+            )
+
     if not any(word in lowered for word in
                (matching.normalise(w) for w in _MARGIN_WORDS)):
-        return None, "not a margin market"
+        return None, True, "not a margin market"
 
     numbers = re.findall(r"-?\d{1,3}(?:\.5)?", title)
     if not numbers:
@@ -332,34 +366,50 @@ def parse_rung(market, favourite: str,
         if any(w in lowered for w in _WINNER_WORDS) and \
                 not any(w in lowered for w in _NOT_A_WINNER):
             if not matching.find_team(title, favourite):
-                return None, "the title does not say which team it is about"
+                return None, True, (
+                    "the title does not say which team it is about"
+                )
             # BOTH teams, because a game names two and a futures market
             # names one. "Chiefs to win the AFC" is not this Thursday's
             # moneyline, and pricing it as one would be catastrophic
             # rather than merely wrong. The word list above is a second
             # line; this is the principled check.
             if opponent and not matching.find_team(title, opponent):
-                return None, (
+                return None, True, (
                     "names one team only -- a game market names both, so "
                     "this is probably a futures or season-long market"
                 )
-            return 0.0, ""
-        return None, "no threshold in the title"
+            return 0.0, True, ""
+        return None, True, "no threshold in the title"
     if len(set(numbers)) > 1:
         # Two numbers is a band ("by 7 to 13"), which is a different
         # shape from a threshold. Picking one would look like it worked.
-        return None, f"more than one number in the title ({', '.join(numbers)})"
+        return None, True, (
+            f"more than one number in the title ({', '.join(numbers)})"
+        )
 
     threshold = float(numbers[0])
     if abs(threshold) > 100:
-        return None, f"threshold {threshold:g} is not a margin"
+        return None, True, f"threshold {threshold:g} is not a margin"
 
     # Whose margin? If the title names the favourite, the threshold is
     # already from their side. If it names only the underdog, flip it.
-    names_favourite = matching.find_team(title, favourite)
-    if not names_favourite:
-        return None, "the title does not say which team it is about"
-    return threshold, ""
+    # Which side is this threshold about? The subtitle decides when it
+    # names exactly one team, for the same reason it does on the
+    # moneyline path: on a per-team series that IS the side. Getting it
+    # wrong would price the underdog covering as the favourite covering
+    # -- the same number attached to the opposite question.
+    about_favourite = True
+    if subtitle and opponent:
+        names_fav = matching.find_team(subtitle, favourite)
+        names_dog = matching.find_team(subtitle, opponent)
+        if names_fav != names_dog:
+            about_favourite = names_fav
+        elif not matching.find_team(title, favourite):
+            return None, True, "the title does not say which team it is about"
+    elif not matching.find_team(title, favourite):
+        return None, True, "the title does not say which team it is about"
+    return threshold, about_favourite, ""
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +438,9 @@ def price_rungs(
 
     for market in markets:
         opponent = _opponent(line)
-        threshold, problem = parse_rung(market, line.favourite, opponent)
+        threshold, about_favourite, problem = parse_rung(
+            market, line.favourite, opponent
+        )
         if threshold is None:
             skipped.append((market, problem))
             continue
@@ -410,9 +462,17 @@ def price_rungs(
             # disagreeing with the sharpest number on the board for no
             # reason. The model exists for the rungs Pinnacle does NOT
             # quote; this is not one of them.
-            fair = line.fair_win_prob
+            #
+            # And the side matters: each fixture is listed once per team,
+            # so half these contracts pay on the UNDERDOG. Pricing those
+            # with the favourite's probability would make every one of
+            # them look like a gift.
+            fair = (line.fair_win_prob if about_favourite
+                    else 1.0 - line.fair_win_prob)
         else:
-            fair = model.prob_margin_over(threshold)
+            fair = model.prob_margin_over(
+                threshold if about_favourite else -threshold
+            )
         fee = kalshi.fee_for(fillable, price, maker, kc)
         cost = fillable * price + fee
         if cost <= 0:
@@ -432,7 +492,8 @@ def price_rungs(
             ticker=market.ticker, title=getattr(market, "title", ""),
             threshold=threshold, fair=fair, price=price,
             contracts=fillable, ev=ev, edge=fair - price,
-            matchup=line.matchup, favourite=line.favourite,
+            matchup=line.matchup,
+            favourite=(line.favourite if about_favourite else opponent),
             sport=sport,
             commence_time=str(line.event.get("commence_time") or ""),
             maker=maker, flags=flags,
