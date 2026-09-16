@@ -366,7 +366,7 @@ class TestCollectGameMarkets:
             self.event("Best Picture winner", ["KXOSCARPIC-1"]),
             self.event("Will the Fed cut rates?", ["KXFED-1"]),
         ])
-        markets, series = KS.collect_game_markets(client, lines)
+        markets, series, _near = KS.collect_game_markets(client, lines)
         assert [m.ticker for m in markets] == ["KXNFLSPREAD-1",
                                                "KXNFLSPREAD-2"]
         assert series == {"KXNFLSPREAD": 2}
@@ -377,7 +377,7 @@ class TestCollectGameMarkets:
             self.event("Chiefs vs Broncos margin", ["KXNFLSPREAD-1"]),
             self.event("Chiefs vs Broncos total", ["KXNFLTOTAL-1"]),
         ])
-        _markets, series = KS.collect_game_markets(client, lines)
+        _markets, series, _near = KS.collect_game_markets(client, lines)
         assert dict(series) == {"KXNFLSPREAD": 1, "KXNFLTOTAL": 1}
 
     def test_the_event_title_is_carried_into_each_market(self, lines):
@@ -387,12 +387,12 @@ class TestCollectGameMarkets:
         client = self.Client([
             self.event("Chiefs vs Broncos margin", ["KXNFLSPREAD-1"]),
         ])
-        (market,), _series = KS.collect_game_markets(client, lines)
+        (market,), _series, _near = KS.collect_game_markets(client, lines)
         assert "Chiefs" in market.title and "Broncos" in market.title
 
     def test_an_unrelated_board_yields_nothing_rather_than_noise(self, lines):
         client = self.Client([self.event("Best Picture", ["KXOSCARPIC-1"])])
-        markets, series = KS.collect_game_markets(client, lines)
+        markets, series, _near = KS.collect_game_markets(client, lines)
         assert markets == [] and not series
 
     def test_a_malformed_market_does_not_lose_its_event(self, lines):
@@ -402,12 +402,49 @@ class TestCollectGameMarkets:
                         {"ticker": "KXNFLSPREAD-2", "subtitle": "Above 6.5",
                          "status": "active"}],
         }])
-        markets, _series = KS.collect_game_markets(client, lines)
+        markets, _series, _near = KS.collect_game_markets(client, lines)
         assert [m.ticker for m in markets] == ["KXNFLSPREAD-2"]
+
+    def test_one_team_name_is_not_enough(self):
+        """
+        The collision that produced twenty-eight phantom candidates on a
+        live run: Winnipeg's JETS on an NFL board, and US Treasury BILLS
+        against Buffalo's. Requiring one team let both through, and they
+        then buried the real finding -- that nothing named two.
+        """
+        lines = KS.game_lines([odds_event(
+            home="Buffalo Bills", away="New York Jets",
+            home_point=-3.5, eid="buf-nyj",
+        )])
+        client = self.Client([
+            self.event("Winnipeg Jets season points", ["KXNHLSEASONPTS-1"]),
+            self.event("US Treasury bills above 4%", ["KXUSDTTBILL-1"]),
+        ])
+        markets, series, near = KS.collect_game_markets(client, lines)
+        assert markets == []
+        assert not series
+        # But the collision is REPORTED, because "the board is empty" and
+        # "something matched for the wrong reason" are different answers.
+        assert near["jets"] == 1
+        assert near["bills"] == 1
+
+    def test_a_real_game_still_passes_with_both_teams(self):
+        lines = KS.game_lines([odds_event(
+            home="Buffalo Bills", away="New York Jets",
+            home_point=-3.5, eid="buf-nyj",
+        )])
+        client = self.Client([
+            self.event("Jets at Bills: winning margin", ["KXNFLSPREAD-1"]),
+        ])
+        markets, series, near = KS.collect_game_markets(client, lines)
+        assert len(markets) == 1
+        assert series == {"KXNFLSPREAD": 1}
+        assert not near
 
     def test_an_unreachable_events_endpoint_is_not_fatal(self, lines):
         class Broken(self.Client):
             def events(self, **kw):
                 raise RuntimeError("nope")
 
-        assert KS.collect_game_markets(Broken([]), lines) == ([], Counter())
+        assert KS.collect_game_markets(Broken([]), lines) == (
+            [], Counter(), Counter())

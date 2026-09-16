@@ -777,6 +777,36 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
     market_data = kalshi.MarketData(
         base_url=args.base_url or cfg.kalshi.base_url
     )
+
+    if args.grep:
+        # Finding where a kind of market lives, when the sweep comes back
+        # empty. Better than being told to guess a series ticker.
+        wanted = " ".join(args.grep).lower()
+        try:
+            events = market_data.events(status="open", max_pages=25)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not reach Kalshi: {exc}")
+            db.close()
+            return 1
+        hits = {}
+        for event in events:
+            title = event.get("title") or event.get("sub_title") or ""
+            ticker = event.get("event_ticker") or event.get("series_ticker") or ""
+            if wanted in f"{title} {ticker}".lower():
+                hits.setdefault(str(ticker).split("-")[0], []).append(title)
+        if not hits:
+            print(f"Nothing in {len(events):,} open event(s) mentions "
+                  f"{wanted!r}.")
+        else:
+            print(f"{sum(len(v) for v in hits.values())} event(s) mentioning "
+                  f"{wanted!r}, across {len(hits)} series:\n")
+            for series, titles in sorted(hits.items()):
+                print(f"  {series:<24} {titles[0][:60]}")
+                if len(titles) > 1:
+                    print(f"{'':<26} ...and {len(titles) - 1} more")
+        print(f"\n({market_data.requests_made} Kalshi request(s))")
+        db.close()
+        return 0
     priors = ladder.PriorSet.load()
     sports = args.sports or cfg.sports
     result = KS.ScanResult()
@@ -798,7 +828,7 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
             continue
 
         try:
-            markets, series_counts = KS.collect_game_markets(
+            markets, series_counts, near = KS.collect_game_markets(
                 market_data, lines, series_ticker=args.series
             )
         except Exception as exc:  # noqa: BLE001
@@ -808,8 +838,20 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
         result.markets_seen += len(markets)
         result.series.update(series_counts)
         if not markets:
-            print(f"{sport}: Kalshi lists nothing naming any of the "
-                  f"{len(lines)} game(s) {cfg.books.sharp} prices.")
+            print(f"{sport}: Kalshi lists nothing naming BOTH teams of any "
+                  f"of the {len(lines)} game(s) {cfg.books.sharp} prices.")
+            if near:
+                # A single team name matching is what a nickname
+                # collision looks like: Winnipeg's Jets on an NFL board,
+                # or Treasury bills against Buffalo.
+                shown = ", ".join(f"{name} ({n})"
+                                  for name, n in near.most_common(5))
+                print(f"  Markets naming one team only: {shown}")
+                print("  Those are usually another sport or another "
+                      "market entirely sharing a nickname.")
+            print("  Either Kalshi has not posted these games yet, or they "
+                  "are past the\n  page cap. Go looking with:  betedge "
+                  "kalshi scan --grep nfl")
             continue
 
         matched, unmatched = matching.match_markets(
@@ -2358,6 +2400,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="list the markets joined but not priced")
     s.add_argument("--no-notify", action="store_true")
     s.add_argument("--dry-run-notify", action="store_true")
+    s.add_argument("--grep", metavar="TEXT", nargs="+",
+                   help="instead of scanning, print the open events "
+                        "mentioning TEXT with their series. For finding "
+                        "where a sport lives on the exchange")
     s.add_argument("--base-url", dest="base_url", metavar="URL")
     s.set_defaults(func=cmd_kalshi_scan)
 

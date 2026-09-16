@@ -230,9 +230,12 @@ def collect_game_markets(client, lines, series_ticker=None, max_pages=25):
     often just a threshold. So the event title is carried down into each
     of its markets, without which nothing could be identified at all.
 
-    Returns (markets, series_counts) -- the second so a run can SAY where
-    the games it found live, rather than leaving the operator to guess a
-    series ticker.
+    Returns (markets, series_counts, near_misses). The second says where
+    the games live, so a narrowed re-run is a command rather than a
+    guess. The third counts events that named exactly ONE team, which is
+    what a nickname collision looks like from here -- and the difference
+    between "the board is empty" and "something matched for the wrong
+    reason" is worth being told.
     """
     from .kalshi import parse_market
 
@@ -250,9 +253,18 @@ def collect_game_markets(client, lines, series_ticker=None, max_pages=25):
         events = []
 
     found, series = [], Counter()
+    near_misses = Counter()
     for event in events:
         title = event.get("title") or event.get("sub_title") or ""
-        if not any(matching.find_team(title, team) for team in teams):
+        named = {team for team in teams if matching.find_team(title, team)}
+        if len(named) < 2:
+            # TWO teams, matching the standard the real join applies.
+            # Requiring only one let Winnipeg's Jets and US Treasury
+            # BILLS through on an NFL board -- twenty-eight markets that
+            # were never candidates, which then buried the actual
+            # finding underneath them.
+            for team in named:
+                near_misses[matching.nickname(team)] += 1
             continue
         for raw in event.get("markets") or []:
             raw = dict(raw)
@@ -266,7 +278,7 @@ def collect_game_markets(client, lines, series_ticker=None, max_pages=25):
             found.append(market)
             if market.ticker:
                 series[market.ticker.split("-")[0]] += 1
-    return found, series
+    return found, series, near_misses
 
 
 # ---------------------------------------------------------------------------
