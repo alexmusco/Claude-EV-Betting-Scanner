@@ -825,6 +825,42 @@ class TestNotifyCommands:
         assert "Nothing sent yet" in capsys.readouterr().out
 
 
+class TestKalshiSubcommandsParse:
+    """
+    Every kalshi subcommand reaches its handler THROUGH THE PARSER.
+
+    The tests below call the handlers directly, which is the wrong end:
+    a handler can be perfect and the command still not exist, and that
+    is exactly what a user hits -- `invalid choice: 'raw'` -- while the
+    suite stays green. These assert the wiring itself.
+    """
+
+    def parse(self, argv):
+        return cli.build_parser().parse_args(argv)
+
+    def test_raw_is_wired_to_its_handler(self):
+        args = self.parse(["kalshi", "raw", "KXNFLGAME-X-DET"])
+        assert args.func is cli.cmd_kalshi_raw
+        assert args.ticker == "KXNFLGAME-X-DET"
+
+    def test_scan_and_calibrate_are_too(self):
+        assert self.parse(["kalshi", "scan"]).func is cli.cmd_kalshi_scan
+        assert self.parse(["kalshi", "calibrate"]).func \
+            is cli.cmd_kalshi_calibrate
+
+    def test_every_kalshi_subcommand_has_a_handler(self):
+        # Catches a subparser added without set_defaults, which parses
+        # fine and then fails at dispatch.
+        parser = cli.build_parser()
+        kalshi = [a for a in parser._subparsers._group_actions[0].choices.items()
+                  if a[0] == "kalshi"][0][1]
+        names = list(kalshi._subparsers._group_actions[0].choices)
+        assert set(names) >= {"scan", "raw", "calibrate"}
+        for name in names:
+            assert self.parse(["kalshi", name] + (
+                ["T"] if name == "raw" else [])).func is not None
+
+
 class TestKalshiRaw:
     """
     The escape hatch: print what the exchange actually sends.
