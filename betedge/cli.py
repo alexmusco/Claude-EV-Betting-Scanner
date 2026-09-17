@@ -975,27 +975,57 @@ def cmd_kalshi_raw(cfg: Config, args) -> int:
     client = kalshi.MarketData(
         base_url=args.base_url or cfg.kalshi.base_url
     )
-    targets = [
-        (f"/markets/{args.ticker}", None),
-        (f"/markets/{args.ticker}/orderbook", {"depth": 10}),
-    ]
-    if args.path:
-        targets = [(args.path, None)]
 
-    for path, params in targets:
+    def dump(path, params=None, label=""):
         print(f"===== GET {path} "
               + (f"{params} " if params else "")
+              + (f"[{label}] " if label else "")
               + "=" * 20)
         try:
             payload = client.raw(path, params)
         except Exception as exc:  # noqa: BLE001
             print(f"  failed: {exc}\n")
-            continue
+            return None
         text = json.dumps(payload, indent=2, default=str)
         if len(text) > args.limit:
             text = text[:args.limit] + f"\n  ...truncated at {args.limit} chars"
         print(text)
         print()
+        return payload
+
+    if args.path:
+        dump(args.path)
+        print(f"({client.requests_made} request(s))")
+        return 0
+
+    ticker = args.ticker
+    # A Kalshi URL gives the EVENT ticker, and a market ticker is that
+    # plus a suffix nobody can reliably guess from outside. Rather than
+    # make the operator produce the right one -- a guess that has
+    # already cost rounds here -- take whichever they have: if the
+    # ticker is not a market, ask what markets the EVENT holds and dump
+    # the first one's book.
+    market = dump(f"/markets/{ticker}")
+    if market is None:
+        event = dump(f"/events/{ticker}", {"with_nested_markets": "true"})
+        tickers = []
+        if isinstance(event, dict):
+            nested = (event.get("event") or {}).get("markets") \
+                or event.get("markets") or []
+            tickers = [m.get("ticker") for m in nested
+                       if isinstance(m, dict) and m.get("ticker")]
+        if not tickers:
+            print(f"{ticker} is neither a market nor an event with "
+                  "markets. Check the ticker.")
+            print(f"({client.requests_made} request(s))")
+            return 1
+        print(f"--- {ticker} is an EVENT holding {len(tickers)} market(s): "
+              f"{', '.join(tickers[:8])}"
+              + (" ..." if len(tickers) > 8 else ""))
+        print("--- dumping the order book of the first one\n")
+        ticker = tickers[0]
+
+    dump(f"/markets/{ticker}/orderbook", {"depth": 10})
     print(f"({client.requests_made} request(s))")
     return 0
 

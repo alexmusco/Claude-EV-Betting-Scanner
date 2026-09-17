@@ -823,3 +823,84 @@ class TestNotifyCommands:
         cfg_path, _client, _tmp = wired
         cli.main(["--config", str(cfg_path), "notify", "log"])
         assert "Nothing sent yet" in capsys.readouterr().out
+
+
+class TestKalshiRaw:
+    """
+    The escape hatch: print what the exchange actually sends.
+
+    It exists because five scans in a row failed on a guess about an
+    undocumented payload, and every one of those would have been a
+    two-minute fix with the real thing in hand.
+    """
+
+    def stub(self, monkeypatch, market_fails=False):
+        from betedge import kalshi
+
+        calls = []
+
+        class Stub:
+            requests_made = 0
+
+            def __init__(self, **kwargs):
+                pass
+
+            def raw(self, path, params=None):
+                calls.append(path)
+                Stub.requests_made += 1
+                if path.endswith("/orderbook"):
+                    return {"orderbook": {"yes": [[55, 10]], "no": [[42, 25]]}}
+                if path.startswith("/markets/"):
+                    if market_fails:
+                        raise kalshi.KalshiError("404 not a market")
+                    return {"market": {"ticker": "M"}}
+                return {"markets": [{"ticker": "EV-DET"}, {"ticker": "EV-BUF"}]}
+
+        monkeypatch.setattr("betedge.kalshi.MarketData", Stub)
+        return calls
+
+    def args(self, ticker="M"):
+        import types
+
+        return types.SimpleNamespace(ticker=ticker, path=None, limit=100000,
+                                     base_url=None)
+
+    def cfg(self):
+        import types
+
+        return types.SimpleNamespace(
+            kalshi=types.SimpleNamespace(base_url="x"))
+
+    def test_a_market_ticker_dumps_the_market_and_its_book(self, monkeypatch,
+                                                           capsys):
+        calls = self.stub(monkeypatch)
+        assert cli.cmd_kalshi_raw(self.cfg(), self.args()) == 0
+        assert calls == ["/markets/M", "/markets/M/orderbook"]
+
+    def test_an_event_ticker_resolves_to_a_market(self, monkeypatch, capsys):
+        """
+        A Kalshi URL gives the EVENT ticker. Demanding the market ticker
+        would put the operator back in the guessing business that this
+        command exists to end.
+        """
+        calls = self.stub(monkeypatch, market_fails=True)
+        assert cli.cmd_kalshi_raw(self.cfg(), self.args("EV")) == 0
+        assert calls == ["/markets/EV", "/events/EV", "/markets/EV-DET/orderbook"]
+        out = capsys.readouterr().out
+        assert "is an EVENT holding 2 market(s)" in out
+
+    def test_a_ticker_that_is_neither_says_so(self, monkeypatch, capsys):
+        from betedge import kalshi
+
+        class Stub:
+            requests_made = 0
+
+            def __init__(self, **kwargs):
+                pass
+
+            def raw(self, path, params=None):
+                raise kalshi.KalshiError("404")
+
+        monkeypatch.setattr("betedge.kalshi.MarketData", Stub)
+        assert cli.cmd_kalshi_raw(self.cfg(), self.args("NOPE")) == 1
+        assert "neither a market nor an event" in capsys.readouterr().out
