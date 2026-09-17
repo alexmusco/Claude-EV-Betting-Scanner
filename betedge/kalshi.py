@@ -279,6 +279,18 @@ def parse_orderbook(raw: dict, ticker: str = "") -> OrderBook:
     if not isinstance(book, dict):
         raise KalshiError(f"not an order book: {raw!r}")
 
+    # A book with NEITHER side present is not an empty book, it is a
+    # response this client cannot read -- and the two are
+    # indistinguishable downstream, where both look like "nothing
+    # offered". Saying so is the difference between "the market is thin"
+    # and "the parser is wrong", which cost several rounds to tell apart.
+    if YES not in book and NO not in book:
+        raise KalshiError(
+            f"an order book with no {YES!r} or {NO!r} key: keys are "
+            f"{sorted(book)!r}. This client's assumed shape is wrong for "
+            "this response -- see `betedge kalshi raw <ticker>`."
+        )
+
     yes_bids = _levels(book.get(YES))
     no_bids = _levels(book.get(NO))
     return OrderBook(
@@ -418,6 +430,17 @@ class MarketData:
         if not isinstance(payload, dict):
             raise KalshiError(f"{path}: expected a JSON object")
         return payload
+
+    def raw(self, path: str, params: dict | None = None) -> dict:
+        """
+        One endpoint's response, unparsed.
+
+        For looking at what a venue actually sends instead of reasoning
+        about what it ought to. Every wrong assumption in this client so
+        far would have been a two-minute fix with the real payload in
+        hand, and was not without it.
+        """
+        return self._get(path, params or {})
 
     def market(self, ticker: str) -> Market:
         payload = self._get(f"/markets/{ticker}")

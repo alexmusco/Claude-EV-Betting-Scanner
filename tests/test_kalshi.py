@@ -170,6 +170,31 @@ class TestOrderBookInversion:
         with pytest.raises(K.KalshiError, match="not an order book"):
             K.parse_orderbook({"orderbook": [1, 2, 3]})
 
+    def test_a_book_with_neither_side_named_is_refused_loudly(self):
+        """
+        A shape this client cannot read must not masquerade as a market
+        nobody is quoting.
+
+        Both produce an empty book, and downstream they are the same
+        "nothing offered" -- which is how a whole NFL slate came back
+        blank without anyone being able to say whether the exchange was
+        quiet or the parser was wrong. The error names the keys it DID
+        find, because that is the one fact needed to fix it.
+        """
+        with pytest.raises(K.KalshiError, match="assumed shape is wrong"):
+            K.parse_orderbook({"orderbook": {"yes_bids": [], "no_bids": []}})
+
+    def test_the_refusal_names_the_keys_it_actually_got(self):
+        with pytest.raises(K.KalshiError) as caught:
+            K.parse_orderbook({"orderbook": {"bids": [], "asks": []}})
+        assert "asks" in str(caught.value) and "bids" in str(caught.value)
+
+    def test_one_side_present_is_a_thin_book_not_a_refusal(self):
+        # Kalshi may legitimately send a book with only one side resting.
+        # That is a real market and must still parse.
+        book = K.parse_orderbook({"orderbook": {"yes": [[55, 10]]}})
+        assert book.yes_bids and book.yes_asks == []
+
 
 # --------------------------------------------------------------------------
 # Depth

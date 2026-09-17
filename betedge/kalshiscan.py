@@ -417,6 +417,35 @@ def parse_rung(market, favourite: str,
 # ---------------------------------------------------------------------------
 
 
+def _nothing_offered(book) -> str:
+    """
+    Why nothing is buyable, in terms of what the book actually held.
+
+    "nothing offered" was equally true of an empty book, a one-sided
+    book, and a book this client read the wrong way, and it distinguished
+    them for nobody -- a whole NFL slate came back with that one phrase
+    against all 32 markets, which tells you every possible thing except
+    which of the three it was.
+
+    The distinction that matters: a YES ask is a resting NO BID
+    (see kalshi.py). So a book stacked with YES bids and no NO bids
+    offers a YES buyer nothing while being nowhere near empty, and that
+    is a real thin market. Both sides empty on a liquid slate is not a
+    thin market -- it is a parser reading the wrong fields.
+    """
+    resting = (f"{len(book.yes_bids)} yes and {len(book.no_bids)} no "
+               f"bid(s) resting")
+    if not book.yes_bids and not book.no_bids:
+        # Deliberately free of the ticker: the caller counts identical
+        # reasons, and a per-market string would turn one loud finding
+        # into thirty-two quiet ones. The caller prints an example
+        # ticker alongside the count.
+        return ("order book came back EMPTY ON BOTH SIDES -- if these "
+                "markets are quoted on the site, this client is reading "
+                "them wrong; run `bet kalshi raw <ticker>`")
+    return f"no one is offering yes ({resting})"
+
+
 def price_rungs(
     model: ladder.MarginModel,
     line: GameLine,
@@ -452,7 +481,7 @@ def price_rungs(
         maker = _pays_maker_fee(market.ticker, kc)
         price, fillable = book.cost_to_buy(kalshi.YES, kc.depth_contracts)
         if fillable == 0:
-            skipped.append((market, "nothing offered"))
+            skipped.append((market, _nothing_offered(book)))
             continue
 
         if threshold == 0.0:

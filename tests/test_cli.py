@@ -708,8 +708,19 @@ class TestNotifyInDaily:
     def test_quiet_hours_are_reported_not_silent(self, wired, capsys):
         # A run that sends nothing because of the hour must say so, or it
         # is indistinguishable from a broken notifier.
+        #
+        # The window is built AROUND the clock rather than written down,
+        # because `daily` reads the real time. A fixed "00:00 to 23:59"
+        # covers every minute but one, and this test duly failed once,
+        # at 23:59. An hour either side of now is quiet whenever the
+        # suite runs, and still goes through the real wrapping logic.
         cfg_path, _client, tmp_path = wired
-        self.enable(tmp_path, quiet_start="00:00", quiet_end="23:59")
+        now = datetime.now(timezone.utc).astimezone()
+        self.enable(
+            tmp_path,
+            quiet_start=(now - timedelta(hours=1)).strftime("%H:%M"),
+            quiet_end=(now + timedelta(hours=1)).strftime("%H:%M"),
+        )
         cli.main(["--config", str(cfg_path), "daily", "--no-report"])
         assert "Quiet hours" in capsys.readouterr().out
 

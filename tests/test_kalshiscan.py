@@ -233,13 +233,32 @@ class TestPriceRungs:
         assert quote.contracts == 12
         assert any("only_12_of_100_fillable" in f for f in quote.flags)
 
-    def test_an_empty_book_is_skipped_with_a_reason(self, setup):
+    def test_an_empty_book_says_it_may_be_a_parser_fault(self, setup):
+        # A book empty on BOTH sides across a liquid slate is far more
+        # likely to be this client reading the wrong fields than 32
+        # NFL markets nobody wants, so the message has to point there.
         cfg, line, model = setup
         markets = [FakeMarket("T", "Chiefs to beat the Broncos by more than 3.5")]
         (quotes, skipped) = KS.price_rungs(model, line, markets,
                                            {"T": book(no_bids=[])}, cfg)
         assert quotes == []
-        assert skipped[0][1] == "nothing offered"
+        assert "EMPTY ON BOTH SIDES" in skipped[0][1]
+        assert "kalshi raw" in skipped[0][1]
+
+    def test_a_one_sided_book_is_not_called_empty(self, setup):
+        # YES asks come from NO bids, so a book full of YES bids offers a
+        # YES buyer nothing while being a perfectly real, thin market.
+        # Reporting that as "empty" would send the reader hunting a bug
+        # that is not there.
+        cfg, line, model = setup
+        markets = [FakeMarket("T", "Chiefs to beat the Broncos by more than 3.5")]
+        (quotes, skipped) = KS.price_rungs(
+            model, line, markets,
+            {"T": book(no_bids=[], yes_bids=[[40, 250]])}, cfg,
+        )
+        assert quotes == []
+        assert "no one is offering yes" in skipped[0][1]
+        assert "BOTH SIDES" not in skipped[0][1]
 
     def test_a_market_with_no_book_is_skipped(self, setup):
         cfg, line, model = setup

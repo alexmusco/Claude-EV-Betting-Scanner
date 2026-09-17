@@ -904,13 +904,19 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
             if line is None:
                 continue
             books = {}
+            book_errors = []
             for market in event_markets[:args.max_books]:
                 try:
                     books[market.ticker] = market_data.orderbook(market.ticker)
-                except Exception:  # noqa: BLE001
-                    continue
+                except Exception as exc:  # noqa: BLE001
+                    # Never silently. A swallowed fetch failure and a
+                    # market nobody is quoting look identical downstream,
+                    # and telling those two apart is most of the work
+                    # when a scan comes back with nothing.
+                    book_errors.append((market, f"{type(exc).__name__}: {exc}"))
 
             game = KS.GameResult(line=line, model=None, matchup=line.matchup)
+            game.skipped.extend(book_errors)
             # The model-free check first: it survives every way the fit
             # below can be wrong, so it is reported even when the fit
             # fails outright.
@@ -926,9 +932,13 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
                 result.games.append(game)
                 continue
 
-            game.quotes, game.skipped = KS.price_rungs(
+            # EXTEND, never assign: `game.skipped` already carries the
+            # order books that failed to fetch, and an assignment here
+            # would drop exactly the diagnosis this run needs most.
+            game.quotes, priced_skips = KS.price_rungs(
                 game.model, line, event_markets, books, cfg, sport=sport
             )
+            game.skipped.extend(priced_skips)
             result.games.append(game)
 
     result.requests = market_data.requests_made
@@ -947,6 +957,46 @@ def cmd_kalshi_scan(cfg: Config, args) -> int:
             print("\nQuiet hours: nothing sent.")
 
     db.close()
+    return 0
+
+
+def cmd_kalshi_raw(cfg: Config, args) -> int:
+    """
+    Print what Kalshi actually sends, unparsed.
+
+    Because reasoning about an undocumented shape from the outside has
+    now cost several rounds, and every one of those wrong guesses would
+    have been a two-minute fix with the real payload in hand.
+    """
+    import json
+
+    from . import kalshi
+
+    client = kalshi.MarketData(
+        base_url=args.base_url or cfg.kalshi.base_url
+    )
+    targets = [
+        (f"/markets/{args.ticker}", None),
+        (f"/markets/{args.ticker}/orderbook", {"depth": 10}),
+    ]
+    if args.path:
+        targets = [(args.path, None)]
+
+    for path, params in targets:
+        print(f"===== GET {path} "
+              + (f"{params} " if params else "")
+              + "=" * 20)
+        try:
+            payload = client.raw(path, params)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  failed: {exc}\n")
+            continue
+        text = json.dumps(payload, indent=2, default=str)
+        if len(text) > args.limit:
+            text = text[:args.limit] + f"\n  ...truncated at {args.limit} chars"
+        print(text)
+        print()
+    print(f"({client.requests_made} request(s))")
     return 0
 
 
@@ -1081,9 +1131,18 @@ def _print_kalshi(result, cfg, args) -> None:
         from collections import Counter
 
         reasons = Counter(why for _m, why in skipped)
+        # One example ticker per reason, always. A count alone tells you
+        # a problem exists; the ticker is what you need to go look at it,
+        # and making that a flag puts it out of reach of the person who
+        # does not yet know there is something to ask about.
+        example = {}
+        for market, why in skipped:
+            example.setdefault(why, getattr(market, "ticker", "") or "")
         print("\nJoined but not priced:")
         for reason, count in reasons.most_common(6):
             print(f"  {count:>4}  {reason}")
+            if example.get(reason):
+                print(f"        e.g. {example[reason]}")
         if args.show_skipped:
             print()
             for market, why in skipped[:20]:
@@ -2465,6 +2524,20 @@ def build_parser() -> argparse.ArgumentParser:
                         "where a sport lives on the exchange")
     s.add_argument("--base-url", dest="base_url", metavar="URL")
     s.set_defaults(func=cmd_kalshi_scan)
+
+    s = ksub.add_parser(
+        "raw",
+        help="print what Kalshi actually sends for one market, unparsed",
+        description="For when the parsed result is empty and the question "
+                    "is whether the market is thin or this client's "
+                    "assumed shape is wrong.",
+    )
+    s.add_argument("ticker", help="a market ticker, e.g. KXNFLGAME-...-DET")
+    s.add_argument("--path", help="fetch this API path instead")
+    s.add_argument("--limit", type=int, default=4000,
+                   help="characters of JSON to print per response")
+    s.add_argument("--base-url", dest="base_url", metavar="URL")
+    s.set_defaults(func=cmd_kalshi_raw)
 
     s = ksub.add_parser(
         "calibrate",
