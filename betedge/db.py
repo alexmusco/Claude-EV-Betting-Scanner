@@ -489,7 +489,24 @@ class Database:
         if opportunity_id is not None:
             opp = self.get_opportunity(opportunity_id)
             if opp is None:
-                raise ValueError(f"no opportunity with id {opportunity_id}")
+                # Say what the likely cause is. The number people type
+                # here is copied off a scan table, and that table used to
+                # print a row NUMBER when a scan was not persisted --
+                # indistinguishable from an id until this line rejected
+                # it, long after the output had scrolled away.
+                newest = self.conn.execute(
+                    "SELECT MAX(id) FROM opportunities"
+                ).fetchone()[0]
+                hint = (f" The highest id on record is {newest}."
+                        if newest else " No opportunities have been saved yet.")
+                raise ValueError(
+                    f"no opportunity with id {opportunity_id}.{hint} If you "
+                    "copied it from a scan's # column, check it was a real "
+                    "id and not a parenthesised row number -- `betedge show "
+                    "--ids` lists the saved ones. To log it anyway, pass the "
+                    "details directly: `betedge bet --stake N --price P "
+                    "--book B --selection ... --side ... --line ...`."
+                )
             fields.setdefault("sport", opp["sport"])
             fields.setdefault("event_id", opp["event_id"])
             fields.setdefault("commence_time", opp["commence_time"])

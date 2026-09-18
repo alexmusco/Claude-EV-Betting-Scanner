@@ -1207,10 +1207,16 @@ def notify_kalshi(cfg, db, quotes, now=None, dry_run=False) -> dict:
             continue
         message = N.Message(
             title=f"{quote.ev:+.1%}  {quote.describe()}",
-            body=(f"Kalshi {quote.ticker}\n"
+            # The bet leads the BODY as well as the title -- see
+            # format_opportunity in notify.py. The title travels as an
+            # HTTP header and can be dropped in transit; the body is the
+            # payload and always arrives. Opening with the ticker put
+            # the one unreadable string first and the bet nowhere.
+            body=(f"{quote.describe()}   ({quote.ev:+.1%})\n"
                   f"buy YES at {quote.price * 100:.0f}c, fair "
                   f"{quote.fair * 100:.1f}c\n"
-                  f"up to {quote.contracts} contract(s)"),
+                  f"up to {quote.contracts} contract(s)\n"
+                  f"Kalshi {quote.ticker}"),
             tags=["money_with_wings"],
         )
         if dry_run:
@@ -1380,9 +1386,18 @@ def cmd_notify_test(cfg: Config, args) -> int:
         print("Notifications are disabled. Set notify.enabled: true in your "
               "config, or pass --force to test anyway.")
         return 1
+    # The test has to exercise the TITLE channel, not just the body.
+    # The old one said "if you can read this it works" in the body --
+    # which stayed true on a phone where the title never arrived, so a
+    # real bet showed up as one meaningless line and the test still
+    # passed. Now the body tells you what you should ALSO be seeing.
     message = N.Message(
-        title="betedge test",
-        body="If you can read this, the notification chain works.",
+        title="betedge test -- title channel OK",
+        body=("Body received.\n"
+              "The title above should read: "
+              "'betedge test -- title channel OK'.\n"
+              "If you cannot see that title, your phone is only showing "
+              "the body -- which is why bets must lead with the pick."),
         tags=["white_check_mark"],
     )
     try:

@@ -34,6 +34,32 @@ def american(decimal: float) -> str:
 # --------------------------------------------------------------------------
 
 
+def row_ident(obj, index: int) -> str:
+    """
+    The number that goes in the `#` column.
+
+    A database id when the row HAS one, and a PARENTHESISED position when
+    it does not -- never a bare integer that is secretly a row number.
+
+    The `#` column is the number a person types into `betedge bet <id>`.
+    A scan that was not persisted used to print 1, 2, 3 there, identical
+    in appearance to real ids, and the command then failed with "no
+    opportunity with id 32" hours later with the table long since
+    scrolled away. One column meaning two different things, with nothing
+    on screen to say which.
+    """
+    db_id = getattr(obj, "db_id", None)
+    return str(db_id) if db_id else f"({index})"
+
+
+def unsaved_note(rows) -> str:
+    """The footer that explains a parenthesised number, when there is one."""
+    if any(not getattr(r, "db_id", None) for r in rows):
+        return ("\n\n(n) is a row number, not an id: this scan was not saved, "
+                "so those rows cannot be logged with `betedge bet <id>`.")
+    return ""
+
+
 def console_table(opportunities: Sequence[Opportunity], limit: int = 40) -> str:
     if not opportunities:
         return "No opportunities cleared the thresholds."
@@ -44,7 +70,7 @@ def console_table(opportunities: Sequence[Opportunity], limit: int = 40) -> str:
     for i, o in enumerate(opportunities[:limit], 1):
         rows.append(
             [
-                str(o.db_id if getattr(o, "db_id", None) else i),
+                row_ident(o, i),
                 f"{o.ev:+.1%}",
                 _liquidity_label(getattr(o, "liquidity", None)),
                 o.description,
@@ -66,7 +92,8 @@ def console_table(opportunities: Sequence[Opportunity], limit: int = 40) -> str:
     more = ""
     if len(opportunities) > limit:
         more = f"\n\n... and {len(opportunities) - limit} more (use --limit to see them)."
-    return f"{line}\n{sep}\n{body}{more}"
+    note = unsaved_note(opportunities[:limit])
+    return f"{line}\n{sep}\n{body}{more}{note}"
 
 
 def _liquidity_label(score) -> str:
@@ -107,7 +134,7 @@ def shortlist(opportunities: Sequence[Opportunity], limit: int = 12) -> str:
     out.append("-" * len(header))
     for i, o in enumerate(playable[:limit], 1):
         price = f"{american(o.soft_price)} ({o.soft_price:.2f})"
-        ident = o.db_id if getattr(o, "db_id", None) else i
+        ident = row_ident(o, i)
         out.append(
             f"{ident:>3}  {o.ev:>+5.1%}  {_liquidity_label(o.liquidity):<6} "
             f"{o.description:<44.44} {price:>14} "
@@ -572,7 +599,7 @@ def parlay_console(tickets: Sequence, limit: int = 12, title: str = "") -> str:
     out.append("-" * len(header))
 
     for i, t in enumerate(tickets[:limit], 1):
-        ident = t.db_id if getattr(t, "db_id", None) else i
+        ident = row_ident(t, i)
         stake = f"{t.recommended_stake:,.0f}" if t.recommended_stake else "-"
         out.append(
             f"{ident:>4}  {t.ev:>+6.1%}  {t.ev_independent:>+6.1%}  "
@@ -748,7 +775,7 @@ def _leg_rows(ticket) -> str:
 
 def _ticket_block(ticket, index: int) -> str:
     flags = "".join(f'<span class="flag">{_esc(f)}</span>' for f in ticket.flags)
-    ident = ticket.db_id if getattr(ticket, "db_id", None) else index
+    ident = row_ident(ticket, index)
 
     if ticket.correlation_is_load_bearing:
         verdict = (

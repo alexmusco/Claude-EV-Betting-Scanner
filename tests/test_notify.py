@@ -196,8 +196,26 @@ class TestProviders:
         url, kw = session.posts[0]
         assert url == "https://ntfy.sh/topic123"
         assert kw["data"] == b"A body"
-        assert kw["headers"]["Title"] == "A title"
+        assert kw["headers"]["X-Title"] == "A title"
         assert kw["headers"]["Tags"] == "x"
+
+    def test_a_title_that_cannot_be_a_header_does_not_kill_the_send(self):
+        """
+        Headers are latin-1. One accented letter in a player's name would
+        otherwise raise inside the HTTP client and take the whole
+        notification with it -- the bet is worth more than the accent.
+        """
+        session = FakeSession()
+        N.send_ntfy(N.Message("+4.2%  Nikola Joki\u0107 Over 24.5", "b"),
+                    "t", session=session)
+        title = session.posts[0][1]["headers"]["X-Title"]
+        title.encode("latin-1")            # the point: this must not raise
+        assert "Jokic" in title
+
+    def test_a_newline_never_reaches_a_header(self):
+        session = FakeSession()
+        N.send_ntfy(N.Message("one\ntwo", "b"), "t", session=session)
+        assert "\n" not in session.posts[0][1]["headers"]["X-Title"]
 
     def test_ntfy_without_a_topic_is_an_error(self):
         with pytest.raises(N.NotifyError, match="topic"):

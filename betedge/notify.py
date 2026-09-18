@@ -141,6 +141,32 @@ def _post(url: str, session=None, timeout: float = 15.0, **kwargs):
     return response
 
 
+def _header_safe(text: str) -> str:
+    """
+    A string that will survive being sent as an HTTP header.
+
+    Headers are latin-1, so a single accented letter in a player's name
+    -- Amon-Ra St. Brown is fine, but the league is full of names that
+    are not -- raises UnicodeEncodeError inside the HTTP client and
+    takes the whole notification with it. The bet is worth more than the
+    accent, so the accent goes.
+
+    Newlines are stripped too: a header cannot hold one, and a library
+    that does not notice would be splicing attacker-controlled-looking
+    text into the request.
+    """
+    flat = " ".join(str(text or "").split())
+    try:
+        flat.encode("latin-1")
+        return flat
+    except UnicodeEncodeError:
+        import unicodedata
+
+        folded = unicodedata.normalize("NFKD", flat)
+        stripped = "".join(c for c in folded if not unicodedata.combining(c))
+        return stripped.encode("latin-1", "replace").decode("latin-1")
+
+
 def send_ntfy(message: Message, topic: str, server: str = "https://ntfy.sh",
               session=None) -> None:
     """
@@ -153,7 +179,11 @@ def send_ntfy(message: Message, topic: str, server: str = "https://ntfy.sh",
     if not topic:
         raise NotifyError("ntfy needs a topic")
     headers = {
-        "Title": message.title,
+        # `X-Title` is ntfy's canonical spelling; `Title` is an alias.
+        # Prefer the canonical one -- a bare `Title` is the sort of
+        # generic header an intermediary feels free to touch, and the
+        # title is where the bet's name lives.
+        "X-Title": _header_safe(message.title),
         "Priority": str(message.priority),
     }
     if message.tags:
@@ -246,6 +276,33 @@ def send(message: Message, cfg, session=None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _when(value) -> str:
+    """
+    A start time a person can read at a glance, in THEIR timezone.
+
+    "starts 2026-09-18T00:15:00Z" tells a phone user nothing they can
+    act on -- it is a UTC timestamp for a decision measured in how many
+    minutes are left. Anything unparseable falls back to the raw value
+    rather than vanishing.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    local = parsed.astimezone()
+    minutes = (local - datetime.now(local.tzinfo)).total_seconds() / 60.0
+    stamp = local.strftime("%a %-I:%M %p") if hasattr(local, "strftime") else str(local)
+    if 0 < minutes < 600:
+        return f"{stamp} (in {minutes/60:.1f}h)" if minutes >= 60 \
+            else f"{stamp} (in {minutes:.0f}m)"
+    return stamp
+
+
 def format_opportunity(row, stake=None, american=None) -> Message:
     """
     One bet, phrased to be actionable from a lock screen.
@@ -266,15 +323,34 @@ def format_opportunity(row, stake=None, american=None) -> Message:
     ev = get("ev")
 
     title = f"{ev:+.1%}  {what}" if ev is not None else what
-    body_lines = [
-        f"{get('book') or '?'} {shown}",
-        str(get("matchup") or get("market") or ""),
-    ]
+
+    # THE BET GOES FIRST, IN THE BODY.
+    #
+    # Not in the title alone. For ntfy the title travels as an HTTP
+    # HEADER, and a header can be dropped, truncated or mangled by any
+    # hop between here and the phone -- which is exactly what happened:
+    # a notification arrived reading only "Stake 5", because the stake
+    # was the first line of the body and the bet itself existed nowhere
+    # else. The body is the POST payload: UTF-8, unambiguous, and it
+    # always arrives.
+    #
+    # So the body opens with what to place, then how much and at what
+    # price. A lock screen that collapses to one line still shows the
+    # only line that matters.
+    first = what or str(get("market") or "a bet")
+    if ev is not None:
+        first = f"{first}   ({ev:+.1%})"
+    body_lines = [first]
+
+    money = f"{get('book') or '?'} {shown}"
     if stake:
-        body_lines.insert(0, f"Stake {stake:,.0f}")
+        money += f"   stake {stake:,.0f}"
+    body_lines.append(money)
+
+    body_lines.append(str(get("matchup") or get("market") or ""))
     commence = get("commence_time")
     if commence:
-        body_lines.append(f"starts {commence}")
+        body_lines.append(f"starts {_when(commence)}")
     opportunity_id = get("id")
     if opportunity_id:
         # So it can be logged without hunting for the id afterwards.
