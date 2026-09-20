@@ -286,3 +286,28 @@ class TestMessageContent:
         message = N.format_digest(9, 0.061)
         assert "9 bet(s)" in message.title
         assert "+6.1%" in message.title
+
+    def test_a_digest_LISTS_the_bets_rather_than_sending_you_to_a_terminal(self):
+        """
+        The whole point is acting from a lock screen. A digest reading
+        "Run `bet show` for the list" tells a phone to go and ask a
+        laptop what it already knows, which is the one thing a
+        notification must never do.
+        """
+        from betedge import report as R
+
+        rows = [
+            ({"selection": "Tyler Glasnow", "side": "Over", "line": 6.5,
+              "soft_price": 2.62, "book": "draftkings", "ev": 0.061}, 8),
+            ({"selection": "Chris Olave", "side": "Under", "line": 5.5,
+              "soft_price": 2.09, "book": "draftkings", "ev": 0.042}, 5),
+        ]
+        message = N.format_digest(2, 0.061, rows=rows, american=R.american)
+        assert "Tyler Glasnow Over 6.5" in message.body
+        assert "Chris Olave Under 5.5" in message.body
+        assert "+162" in message.body          # the price, not just the edge
+        assert "bet show" not in message.body  # never again
+
+    def test_a_digest_with_no_rows_still_says_something_useful(self):
+        message = N.format_digest(9, 0.061)
+        assert "9 bet(s)" in message.body

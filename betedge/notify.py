@@ -364,12 +364,51 @@ def format_opportunity(row, stake=None, american=None) -> Message:
     )
 
 
-def format_digest(count: int, best_ev, spent=None) -> Message:
-    """A single message standing in for several bets."""
+def digest_line(row, stake=None, american=None) -> str:
+    """One bet, compressed to a single readable line for a digest."""
+    get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
+    bits = [
+        str(get("selection") or "").strip(),
+        str(get("side") or "").strip(),
+        "" if get("line") is None else f"{float(get('line')):g}",
+    ]
+    what = " ".join(b for b in bits if b) or str(get("market") or "a bet")
+    price = get("soft_price")
+    shown = american(price) if (american and price) else price
+    ev = get("ev")
+    line = f"{ev:+.1%}  {what}" if ev is not None else what
+    tail = " ".join(str(x) for x in [get("book") or "", shown or ""] if x)
+    if tail:
+        line += f"  ({tail}"
+        line += f", {stake:,.0f})" if stake else ")"
+    return line
+
+
+def format_digest(count: int, best_ev, spent=None, rows=None,
+                  american=None) -> Message:
+    """
+    A single message standing in for several bets -- WITH the bets in it.
+
+    This used to read "Run `bet show` for the list", which sends you to a
+    terminal to find out what your phone already knew. The whole point of
+    notifying is to be actionable from a lock screen anywhere; a message
+    whose content is an instruction to go and look somewhere else is a
+    message that may as well not have been sent.
+
+    So the digest lists them. It exists to stop a phone buzzing nine
+    times, not to withhold nine bets.
+    """
     title = f"{count} bet(s) to place"
     if best_ev is not None:
         title += f", best {best_ev:+.1%}"
-    body = "Run `bet show` for the list."
+
+    lines = []
+    for entry in (rows or []):
+        row, stake = entry if isinstance(entry, tuple) else (entry, None)
+        lines.append(digest_line(row, stake=stake, american=american))
+    if not lines:
+        lines = [f"{count} bet(s) cleared the bar. Run `bet show` for the list."]
     if spent is not None:
-        body += f"\n({spent} credits)"
-    return Message(title=title, body=body, tags=["money_with_wings"])
+        lines.append(f"({spent} credits)")
+    return Message(title=title, body="\n".join(lines),
+                   tags=["money_with_wings"])

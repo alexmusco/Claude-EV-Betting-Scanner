@@ -1312,7 +1312,16 @@ def notify_opportunities(cfg: Config, db, rows, now=None, spent=None,
         # A phone that vibrates nine times gets silenced, and then the
         # tenth one -- the one that mattered -- is not seen either.
         best = candidates[0][3]
-        messages.append((N.format_digest(len(candidates), best, spent), None))
+        digest_rows = [
+            (row, (row["recommended_stake"]
+                   if "recommended_stake" in row.keys() else None))
+            for row, _fp, _price, _ev, _why in candidates
+        ]
+        messages.append((
+            N.format_digest(len(candidates), best, spent,
+                            rows=digest_rows, american=R.american),
+            None,
+        ))
         for row, fp, price, ev, _why in candidates:
             messages.append((None, (row, fp, price, ev)))
     else:
