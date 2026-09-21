@@ -1049,6 +1049,69 @@ class Database:
             "SELECT * FROM opportunities WHERE id=?", (opp_id,)
         ).fetchone()
 
+    # -------------------------------------------------------------
+    # Duplicate detection
+    #
+    # A bet logged twice is worse than a bet not logged at all. A
+    # missing row makes the sample smaller; a doubled row makes the
+    # P&L, the ROI and the realisation ratio all wrong, in a way that
+    # looks entirely plausible afterwards and can never be spotted from
+    # the numbers themselves. And the moment it is most likely to
+    # happen is exactly this one: pasting a batch of bets copied off a
+    # phone, where a re-run or an overlapping screenshot means doing
+    # half of them twice.
+    #
+    # Identity deliberately EXCLUDES price, stake and status. Betting
+    # the same prop twice at different prices is the thing worth
+    # warning about, not the thing to permit silently -- if it really
+    # was two positions, `--allow-duplicate` says so out loud.
+    # -------------------------------------------------------------
+
+    #: What makes two bets "the same bet".
+    IDENTITY_FIELDS = ("sport", "market", "selection", "side", "line", "book")
+
+    @staticmethod
+    def bet_identity(row) -> tuple:
+        """A normalised identity tuple, so case and spacing cannot hide a dupe."""
+        get = row.get if isinstance(row, dict) else (lambda k, d=None: row[k]
+                                                    if k in row.keys() else d)
+
+        def norm(value):
+            if value is None or value == "":
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            return " ".join(str(value).strip().lower().split())
+
+        return tuple(norm(get(f)) for f in Database.IDENTITY_FIELDS)
+
+    def matching_bets(self, **fields) -> list[sqlite3.Row]:
+        """
+        Every already-logged bet with the same identity as `fields`.
+
+        Voided bets are excluded: a void is a bet that did not happen,
+        so re-logging the same selection afterwards is legitimate.
+        """
+        wanted = self.bet_identity(fields)
+        rows = self.conn.execute(
+            "SELECT * FROM bets WHERE status != 'void'"
+        ).fetchall()
+        return [r for r in rows if self.bet_identity(r) == wanted]
+
+    def duplicate_groups(self) -> list[list[sqlite3.Row]]:
+        """
+        Every set of two-or-more bets in the ledger sharing an identity.
+
+        For auditing what is already there, rather than guarding what is
+        about to go in.
+        """
+        buckets: dict[tuple, list] = {}
+        for row in self.conn.execute(
+            "SELECT * FROM bets WHERE status != 'void' ORDER BY id"
+        ).fetchall():
+            buckets.setdefault(self.bet_identity(row), []).append(row)
+        return [g for g in buckets.values() if len(g) > 1]
+
     def get_bet(self, bet_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
 

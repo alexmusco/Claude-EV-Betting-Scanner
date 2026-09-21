@@ -211,3 +211,94 @@ class TestOrdering:
             )
         db.conn.commit()
         assert [r["selection"] for r in db.opportunities_for_scan(1)] == ["big", "small"]
+
+
+class TestDuplicateBets:
+    """
+    A bet logged twice is worse than a bet not logged at all.
+
+    A missing row only makes the sample smaller. A doubled row makes the
+    P&L, the ROI and the realisation ratio all wrong, plausibly, in a way
+    that can never be spotted from the numbers themselves afterwards.
+    """
+
+    def bet(self, db, **over):
+        fields = dict(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5,
+            book="draftkings", price=2.08, stake=10.0,
+        )
+        fields.update(over)
+        return db.place_bet(**fields)
+
+    def test_the_same_bet_is_found(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        assert len(db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5,
+            book="draftkings")) == 1
+
+    def test_case_and_spacing_cannot_hide_a_duplicate(self, tmp_path):
+        # Copied off a phone by hand, the same bet arrives spelled a
+        # dozen ways. Identity is normalised so none of them slip past.
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        assert db.matching_bets(
+            sport="americanfootball_NFL", market="player_receptions",
+            selection="  rashee   rice ", side="under", line=4.5,
+            book="DraftKings")
+
+    def test_a_different_line_is_a_different_bet(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        assert not db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=5.5,
+            book="draftkings")
+
+    def test_a_different_book_is_a_different_bet(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        assert not db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5, book="fanduel")
+
+    def test_price_and_stake_are_NOT_part_of_identity(self, tmp_path):
+        """
+        Betting the same prop twice at a different price is exactly the
+        thing worth warning about, so a changed price must not make it
+        look like a new bet.
+        """
+        db = Database(tmp_path / "t.db")
+        self.bet(db, price=2.08, stake=10.0)
+        assert db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5,
+            book="draftkings")
+
+    def test_a_voided_bet_does_not_block_relogging(self, tmp_path):
+        # A void is a bet that did not happen.
+        db = Database(tmp_path / "t.db")
+        bet_id = self.bet(db)
+        db.settle_bet(bet_id, "void")
+        assert not db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5,
+            book="draftkings")
+
+    def test_duplicate_groups_finds_what_is_already_there(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        self.bet(db)
+        self.bet(db, selection="George Holani", market="player_anytime_td",
+                 side="Yes", line=None)
+        groups = db.duplicate_groups()
+        assert len(groups) == 1
+        assert len(groups[0]) == 2
+
+    def test_a_clean_ledger_has_no_groups(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        self.bet(db, selection="Deebo Samuel")
+        assert db.duplicate_groups() == []

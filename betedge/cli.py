@@ -582,6 +582,34 @@ def cmd_bet(cfg: Config, args) -> int:
         if v is not None
     }
 
+    # Refuse an apparent duplicate BEFORE writing it. A doubled row
+    # corrupts P&L, ROI and the realisation ratio in a way that looks
+    # perfectly plausible afterwards and cannot be spotted from the
+    # numbers, and the likeliest moment for it is this one: a batch of
+    # bets pasted from a phone, half of which already went in.
+    identity = dict(manual)
+    identity.setdefault("book", args.book)
+    if args.opportunity_id is not None:
+        opp = db.get_opportunity(args.opportunity_id)
+        if opp is not None:
+            for field in ("sport", "market", "selection", "side", "line"):
+                identity.setdefault(field, opp[field])
+            identity.setdefault("book", opp["soft_book"])
+    existing = db.matching_bets(**identity)
+    if existing and not args.allow_duplicate:
+        print("Refusing: this looks like a bet you have already logged.\n")
+        for row in existing:
+            print(f"  #{row['id']}  {R.describe(row['selection'], row['side'], row['line'], row['market'])} "
+                  f"@ {R.american(row['price'])} on {row['book']} for {row['stake']:,.0f} "
+                  f"-- {row['status']}, placed {row['placed_at']}")
+        print(
+            "\nNothing was written. If this really is a second position on "
+            "the same selection,\nre-run with --allow-duplicate. Otherwise "
+            "you are done: it is already in the ledger."
+        )
+        db.close()
+        return 1
+
     bet_id = db.place_bet(
         opportunity_id=args.opportunity_id,
         stake=args.stake,
@@ -611,6 +639,41 @@ def cmd_bet(cfg: Config, args) -> int:
         print("  no event id — `betedge close` won't be able to capture a "
               "closing line for this one. Log bets against a flagged "
               "opportunity (`betedge bet <id>`) and it is filled in for you.")
+    db.close()
+    return 0
+
+
+def cmd_duplicates(cfg: Config, args) -> int:
+    """
+    Bets already in the ledger that share an identity.
+
+    For auditing what is there, as opposed to guarding what is going in.
+    Prints nothing but a clean bill of health when there is nothing to
+    find, so it is cheap to run before and after a batch.
+    """
+    db = Database(cfg.database)
+    groups = db.duplicate_groups()
+    if not groups:
+        total = db.conn.execute(
+            "SELECT COUNT(*) FROM bets WHERE status != 'void'"
+        ).fetchone()[0]
+        print(f"No duplicates. {total} bet(s) in the ledger, all distinct.")
+        db.close()
+        return 0
+
+    print(f"{len(groups)} duplicated bet(s):\n")
+    for group in groups:
+        first = group[0]
+        print(f"  {R.describe(first['selection'], first['side'], first['line'], first['market'])} "
+              f"on {first['book']}")
+        for row in group:
+            print(f"      #{row['id']:>4}  {R.american(row['price']):>6}  "
+                  f"stake {row['stake']:>6,.0f}  {row['status']:<8} "
+                  f"placed {row['placed_at']}")
+        print()
+    print("If one of these is a mistake, remove it with `betedge delete <id>`.\n"
+          "If both are real positions, nothing needs doing -- this command "
+          "reports, it does not judge.")
     db.close()
     return 0
 
@@ -2385,6 +2448,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "American.")
     s.add_argument("--book")
     s.add_argument("--notes")
+    s.add_argument("--allow-duplicate", action="store_true",
+                   dest="allow_duplicate",
+                   help="log it even though a bet with the same sport, "
+                        "market, selection, side, line and book is already "
+                        "in the ledger. Without this, an apparent duplicate "
+                        "is refused and nothing is written.")
     s.add_argument("--settle", choices=["won", "lost", "push", "void",
                                         "half_won", "half_lost"],
                    help="settle it in the same breath, for a bet logged afterwards")
@@ -2403,6 +2472,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--commence", help="ISO start time, e.g. 2026-09-15T00:15:00Z")
     g.add_argument("--matchup", help='e.g. "Denver Broncos @ Kansas City Chiefs"')
     s.set_defaults(func=cmd_bet)
+
+    s = sub.add_parser(
+        "duplicates",
+        help="bets logged more than once",
+        description="A doubled row corrupts P&L, ROI and the realisation "
+                    "ratio in a way the numbers themselves can never "
+                    "reveal. This finds them.",
+    )
+    s.set_defaults(func=cmd_duplicates)
 
     s = sub.add_parser("settle", help="settle a bet")
     s.add_argument("bet_id", type=int)
