@@ -1709,6 +1709,10 @@ class ParlayScanResult:
     #: identical in an empty board unless the scan says which.
     books_requested: list = field(default_factory=list)
     legs_by_book: dict = field(default_factory=dict)
+    #: Every leg built this run, filtered or not, for the line-history
+    #: recorder. Held rather than discarded because the discarded ones
+    #: are half the signal -- see `prop_lines` in db.py.
+    all_legs: list = field(default_factory=list)
     #: The closest legs that failed the break-even filter, best first, and
     #: the bar they had to clear. Together they say whether the board was
     #: nearly there or nowhere near.
@@ -1907,6 +1911,11 @@ def scan_parlays(
             )
 
     state.legs_built = len(all_legs)
+    # Every leg, not just the ones that survive the filter. A leg at 51%
+    # is worthless today and is the whole point tomorrow: it is the
+    # baseline that makes a later 68% readable as a MOVE. See
+    # `prop_lines` in db.py.
+    state.all_legs = list(all_legs)
     state.books_requested = list(target_books)
     for leg in all_legs:
         state.legs_by_book[leg.book] = state.legs_by_book.get(leg.book, 0) + 1

@@ -15,10 +15,11 @@ settled bets to see in profit and loss, but only dozens to see in CLV.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .scan import Opportunity, ScanResult
 
@@ -309,6 +310,51 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE INDEX IF NOT EXISTS idx_notifications_fp
     ON notifications(fingerprint, sent_at);
 
+-- Every prop line this tool has ever seen, with the de-vigged fair
+-- probability of THAT EXACT LINE at that moment.
+--
+-- Why a time series and not just the latest
+-- -----------------------------------------
+-- A pick'em book posts a projection and leaves it. The sharp market
+-- reprices continuously. So the edge on a pick'em pick is not a property
+-- of the line -- it is a property of the line AND THE CLOCK: the same
+-- "Deebo Samuel Over 3.5" is a coin flip at noon and a gift twenty
+-- minutes after his team-mate is ruled out.
+--
+-- A scan that looks once can only ever see the coin flip. It has no way
+-- to know whether it is early or late, because it has nothing to compare
+-- against. This table is that comparison.
+--
+-- `fair_prob` is the whole point. It is the de-vigged probability of the
+-- PICK'EM BOOK'S line, not the sharp book's -- so a move in this column
+-- with `line` unchanged means exactly one thing: the market repriced and
+-- the pick'em book has not yet followed. That is the entire signal.
+--
+-- Recording is free. The scan already fetches all of this and throws it
+-- away; the only cost is disk.
+CREATE TABLE IF NOT EXISTS prop_lines (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at     TEXT NOT NULL,
+    sport           TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    commence_time   TEXT,
+    market          TEXT NOT NULL,
+    selection       TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    book            TEXT NOT NULL,
+    line            REAL,
+    book_price      REAL,
+    fair_prob       REAL NOT NULL,
+    push_prob       REAL,
+    sharp_line      REAL,
+    sharp_price     REAL,
+    line_source     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_prop_lines_key
+    ON prop_lines(sport, event_id, market, selection, side, book, line);
+CREATE INDEX IF NOT EXISTS idx_prop_lines_time ON prop_lines(observed_at);
+
 CREATE TABLE IF NOT EXISTS closing_lines (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     opportunity_id      INTEGER REFERENCES opportunities(id),
@@ -339,6 +385,72 @@ def parse_timestamp(value) -> datetime | None:
     except ValueError:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class LineMove:
+    """
+    A pick'em line that stood still while the market walked away from it.
+
+    `drift` is the change in the de-vigged probability of THE BOOK'S OWN
+    LINE. Positive means the posted side got more likely since it was
+    first seen -- the value is on that side. Negative means it got less
+    likely, and the value is on the other one. Both are edges; only the
+    direction of the bet differs, which is why this refuses to report an
+    absolute number and make you work out the sign yourself.
+    """
+
+    sport: str
+    event_id: str
+    market: str
+    selection: str
+    side: str
+    book: str
+    line: float | None
+    first_seen: datetime | None
+    last_seen: datetime | None
+    fair_first: float
+    fair_last: float
+    sharp_line_first: float | None
+    sharp_line_last: float | None
+    commence_time: str | None = None
+    observations: int = 2
+
+    @property
+    def drift(self) -> float:
+        return self.fair_last - self.fair_first
+
+    @property
+    def value_side(self) -> str:
+        """The side to actually take, which is not always the posted one."""
+        if self.drift >= 0:
+            return self.side
+        return {"over": "Under", "under": "Over"}.get(
+            (self.side or "").lower(), f"not {self.side}")
+
+    @property
+    def sharp_line_moved(self) -> bool:
+        """
+        Whether the SHARP book moved its number too.
+
+        The strongest form of the signal. A fair probability drifting on
+        a static sharp line can be ordinary price noise; the sharp book
+        physically relocating its line while the pick'em book sits still
+        is news that one venue has priced and the other has not.
+        """
+        if self.sharp_line_first is None or self.sharp_line_last is None:
+            return False
+        return abs(self.sharp_line_last - self.sharp_line_first) >= 0.5
+
+    @property
+    def minutes(self) -> float | None:
+        if not self.first_seen or not self.last_seen:
+            return None
+        return (self.last_seen - self.first_seen).total_seconds() / 60.0
+
+    def describe(self) -> str:
+        line = "" if self.line is None else f" {self.line:g}"
+        return f"{self.selection} {self.side}{line}"
 
 
 class Database:
@@ -1111,6 +1223,147 @@ class Database:
         ).fetchall():
             buckets.setdefault(self.bet_identity(row), []).append(row)
         return [g for g in buckets.values() if len(g) > 1]
+
+    # -------------------------------------------------------------
+    # Prop line history, and what moved
+    # -------------------------------------------------------------
+
+    def record_prop_lines(self, legs, sport: str,
+                          observed_at: datetime | None = None) -> int:
+        """
+        Bank every leg a scan built, whether or not it cleared a filter.
+
+        ESPECIALLY the ones that did not clear. A leg at 51% is worthless
+        today and is the entire point tomorrow: it is the baseline that
+        makes a later 68% legible as a MOVE rather than just a number.
+        Recording only the winners would throw away the half of the data
+        that gives the other half its meaning.
+        """
+        observed_at = observed_at or datetime.now(timezone.utc)
+        stamp = observed_at.isoformat()
+        rows = []
+        for leg in legs:
+            fair = getattr(leg, "fair_prob", None)
+            if fair is None:
+                continue
+            commence = getattr(leg, "commence_time", None)
+            rows.append((
+                stamp, sport,
+                str(getattr(leg, "event_id", "") or ""),
+                commence.isoformat() if hasattr(commence, "isoformat")
+                else (str(commence) if commence else None),
+                str(getattr(leg, "market", "") or ""),
+                str(getattr(leg, "selection", "") or ""),
+                str(getattr(leg, "side", "") or ""),
+                str(getattr(leg, "book", "") or ""),
+                getattr(leg, "line", None),
+                getattr(leg, "book_price", None),
+                float(fair),
+                getattr(leg, "push_prob", None),
+                getattr(leg, "sharp_line", None),
+                getattr(leg, "sharp_price_taken", None),
+                getattr(leg, "line_source", None),
+            ))
+        if not rows:
+            return 0
+        with self.tx() as c:
+            c.executemany(
+                "INSERT INTO prop_lines (observed_at, sport, event_id, "
+                "commence_time, market, selection, side, book, line, "
+                "book_price, fair_prob, push_prob, sharp_line, sharp_price, "
+                "line_source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        return len(rows)
+
+    def line_movements(self, min_drift: float = 0.04,
+                       max_age_hours: float = 48.0,
+                       sport: str | None = None,
+                       books: Sequence[str] | None = None,
+                       now: datetime | None = None) -> list["LineMove"]:
+        """
+        Where the market moved and the pick'em book did not.
+
+        Grouped by the book's OWN LINE as well as the selection, which is
+        the crux: if the book moved its number, the two observations
+        belong to different groups and no move is reported. That is
+        correct -- a book that has repriced is a book that has caught up,
+        and there is no edge left in it. Only a line held flat while the
+        fair probability underneath it walked away is worth a phone
+        buzzing.
+
+        Returns the moves sorted by size, largest first. Reports both
+        directions: fair probability falling on a line means the value is
+        on the OTHER side of it.
+        """
+        now = now or datetime.now(timezone.utc)
+        cutoff = (now - timedelta(hours=max_age_hours)).isoformat()
+        sql = ("SELECT * FROM prop_lines WHERE observed_at >= ? "
+               "ORDER BY observed_at")
+        rows = self.conn.execute(sql, (cutoff,)).fetchall()
+
+        wanted_books = {b.lower() for b in books} if books else None
+        groups: dict[tuple, list] = {}
+        for row in rows:
+            if sport and row["sport"] != sport:
+                continue
+            if wanted_books and (row["book"] or "").lower() not in wanted_books:
+                continue
+            key = (row["sport"], row["event_id"], row["market"],
+                   row["selection"], row["side"], row["book"], row["line"])
+            groups.setdefault(key, []).append(row)
+
+        moves = []
+        for key, observations in groups.items():
+            if len(observations) < 2:
+                continue
+            first, last = observations[0], observations[-1]
+            drift = last["fair_prob"] - first["fair_prob"]
+            if abs(drift) < min_drift:
+                continue
+            moves.append(LineMove(
+                sport=key[0], event_id=key[1], market=key[2],
+                selection=key[3], side=key[4], book=key[5], line=key[6],
+                first_seen=parse_timestamp(first["observed_at"]),
+                last_seen=parse_timestamp(last["observed_at"]),
+                fair_first=first["fair_prob"],
+                fair_last=last["fair_prob"],
+                sharp_line_first=first["sharp_line"],
+                sharp_line_last=last["sharp_line"],
+                commence_time=last["commence_time"],
+                observations=len(observations),
+            ))
+        moves.sort(key=lambda m: abs(m.drift), reverse=True)
+        return moves
+
+    def prop_line_coverage(self, hours: float = 48.0,
+                           now: datetime | None = None) -> dict:
+        """
+        Whether there is enough history to say anything yet.
+
+        A single observation of a line proves nothing about whether a
+        book is slow; it takes two. This reports how much of the stored
+        history is actually comparable, so "no moves found" can be told
+        apart from "nothing has been looked at twice".
+        """
+        now = now or datetime.now(timezone.utc)
+        cutoff = (now - timedelta(hours=hours)).isoformat()
+        rows = self.conn.execute(
+            "SELECT sport, event_id, market, selection, side, book, line, "
+            "COUNT(*) n, MIN(observed_at) lo, MAX(observed_at) hi "
+            "FROM prop_lines WHERE observed_at >= ? "
+            "GROUP BY sport, event_id, market, selection, side, book, line",
+            (cutoff,)).fetchall()
+        repeated = [r for r in rows if r["n"] > 1]
+        span = 0.0
+        for r in repeated:
+            lo, hi = parse_timestamp(r["lo"]), parse_timestamp(r["hi"])
+            if lo and hi:
+                span = max(span, (hi - lo).total_seconds() / 3600.0)
+        return {
+            "lines": len(rows),
+            "seen_twice": len(repeated),
+            "observations": sum(r["n"] for r in rows),
+            "widest_span_hours": span,
+        }
 
     def get_bet(self, bet_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()

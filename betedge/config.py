@@ -282,6 +282,11 @@ class ParlayConfig:
     # Push probability to assume on an integer line when Pinnacle does not
     # price both surrounding half-lines. Flagged wherever it is used.
     assumed_push_prob: float = 0.05
+    # How far the de-vigged probability of a pick'em book's OWN line must
+    # drift before it is worth a mention. 4 points is roughly twice the
+    # ordinary tick-to-tick noise on a liquid prop, so below this the
+    # report fills with movement that means nothing.
+    min_line_drift: float = 0.04
 
 
 @dataclass

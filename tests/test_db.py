@@ -302,3 +302,140 @@ class TestDuplicateBets:
         self.bet(db)
         self.bet(db, selection="Deebo Samuel")
         assert db.duplicate_groups() == []
+
+
+class TestPropLineHistory:
+    """
+    The pick'em edge is a property of the line AND THE CLOCK.
+
+    The same "Deebo Samuel Over 3.5" is a coin flip at noon and a gift
+    twenty minutes after his team-mate is ruled out. A scan that looks
+    once can only ever see the coin flip, because it has nothing to
+    compare against.
+    """
+
+    T0 = datetime(2026, 9, 27, 16, 0, tzinfo=timezone.utc)
+
+    def leg(self, selection, side="Over", line=3.5, fair=0.51,
+            sharp_line=3.5, book="prizepicks"):
+        import types
+
+        return types.SimpleNamespace(
+            event_id="mia-sf", market="player_receptions",
+            selection=selection, side=side, line=line, book=book,
+            book_price=None, fair_prob=fair, push_prob=0.0,
+            sharp_line=sharp_line, sharp_price_taken=1.95,
+            line_source="exact", commence_time="2026-09-27T20:00:00Z")
+
+    def db_with(self, tmp_path, first, second, gap_minutes=20):
+        db = Database(tmp_path / "t.db")
+        db.record_prop_lines(first, "americanfootball_nfl", observed_at=self.T0)
+        db.record_prop_lines(second, "americanfootball_nfl",
+                             observed_at=self.T0 + timedelta(minutes=gap_minutes))
+        return db
+
+    def now(self, minutes=25):
+        return self.T0 + timedelta(minutes=minutes)
+
+    def test_a_line_the_market_left_behind_is_reported(self, tmp_path):
+        db = self.db_with(
+            tmp_path,
+            [self.leg("Jauan Jennings", line=4.5, fair=0.505, sharp_line=4.5)],
+            [self.leg("Jauan Jennings", line=4.5, fair=0.671, sharp_line=6.5)])
+        (move,) = db.line_movements(now=self.now())
+        assert move.selection == "Jauan Jennings"
+        assert move.drift == pytest.approx(0.166, abs=1e-3)
+        assert move.minutes == pytest.approx(20.0)
+
+    def test_a_book_that_moved_its_own_line_is_NOT_a_move(self, tmp_path):
+        """
+        The crux. A book that repriced has caught up, and there is no
+        edge left in it. Grouping by the book's own line is what makes
+        that automatic rather than a special case.
+        """
+        db = self.db_with(
+            tmp_path,
+            [self.leg("Malik Washington", line=3.5, fair=0.498)],
+            [self.leg("Malik Washington", line=5.5, fair=0.505)])
+        assert db.line_movements(now=self.now()) == []
+
+    def test_ordinary_noise_is_not_a_move(self, tmp_path):
+        db = self.db_with(
+            tmp_path,
+            [self.leg("Deebo Samuel", fair=0.512)],
+            [self.leg("Deebo Samuel", fair=0.519)])
+        assert db.line_movements(min_drift=0.04, now=self.now()) == []
+
+    def test_a_downward_drift_points_at_the_other_side(self, tmp_path):
+        # Value moving away from the posted side is still value.
+        db = self.db_with(
+            tmp_path,
+            [self.leg("Deebo Samuel", side="Over", fair=0.520)],
+            [self.leg("Deebo Samuel", side="Over", fair=0.390)])
+        (move,) = db.line_movements(now=self.now())
+        assert move.drift < 0
+        assert move.value_side == "Under"
+
+    def test_the_sharp_line_relocating_is_the_strong_form(self, tmp_path):
+        moved = self.db_with(
+            tmp_path / "a",
+            [self.leg("A", fair=0.50, sharp_line=3.5)],
+            [self.leg("A", fair=0.62, sharp_line=5.5)])
+        (strong,) = moved.line_movements(now=self.now())
+        assert strong.sharp_line_moved
+
+        (tmp_path / "b").mkdir(parents=True, exist_ok=True)
+        static = self.db_with(
+            tmp_path / "b",
+            [self.leg("A", fair=0.50, sharp_line=3.5)],
+            [self.leg("A", fair=0.62, sharp_line=3.5)])
+        (weak,) = static.line_movements(now=self.now())
+        assert not weak.sharp_line_moved
+
+    def test_one_observation_can_never_be_a_move(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        db.record_prop_lines([self.leg("Deebo Samuel")],
+                             "americanfootball_nfl", observed_at=self.T0)
+        assert db.line_movements(now=self.now()) == []
+
+    def test_coverage_separates_no_moves_from_nothing_looked_at_twice(
+            self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        db.record_prop_lines([self.leg("A"), self.leg("B")],
+                             "americanfootball_nfl", observed_at=self.T0)
+        once = db.prop_line_coverage(now=self.now())
+        assert once["lines"] == 2 and once["seen_twice"] == 0
+
+        db.record_prop_lines([self.leg("A")], "americanfootball_nfl",
+                             observed_at=self.T0 + timedelta(minutes=20))
+        twice = db.prop_line_coverage(now=self.now())
+        assert twice["seen_twice"] == 1
+        assert twice["widest_span_hours"] == pytest.approx(1 / 3, abs=1e-3)
+
+    def test_losing_legs_are_recorded_too(self, tmp_path):
+        # A 51% leg is worthless today and is the baseline tomorrow.
+        db = Database(tmp_path / "t.db")
+        assert db.record_prop_lines(
+            [self.leg("A", fair=0.31), self.leg("B", fair=0.99)],
+            "americanfootball_nfl", observed_at=self.T0) == 2
+
+    def test_books_can_be_narrowed(self, tmp_path):
+        db = self.db_with(
+            tmp_path,
+            [self.leg("A", fair=0.50, book="draftkings"),
+             self.leg("A", fair=0.50, book="prizepicks")],
+            [self.leg("A", fair=0.70, book="draftkings"),
+             self.leg("A", fair=0.70, book="prizepicks")])
+        both = db.line_movements(now=self.now())
+        assert len(both) == 2
+        (one,) = db.line_movements(books=["prizepicks"], now=self.now())
+        assert one.book == "prizepicks"
+
+    def test_stale_history_falls_out_of_the_window(self, tmp_path):
+        db = self.db_with(
+            tmp_path,
+            [self.leg("A", fair=0.50)],
+            [self.leg("A", fair=0.70)])
+        assert db.line_movements(now=self.now()) != []
+        assert db.line_movements(
+            max_age_hours=1.0, now=self.T0 + timedelta(hours=5)) == []

@@ -1684,9 +1684,41 @@ def cmd_parlay_scan(cfg: Config, args) -> int:
     ticket_ids = db.record_parlay_tickets(
         result.tickets, draws=cfg.parlay.draws
     )
+
+    # Bank the line history. Free: the legs are already built and were
+    # being thrown away. What it buys is the ability to tell a 51% leg
+    # that has always been 51% from one that was 51% an hour ago and is
+    # 67% now -- which is the only kind of pick'em edge worth having.
+    banked = 0
+    for sport in result.sports:
+        banked += db.record_prop_lines(
+            [lg for lg in result.all_legs
+             if getattr(lg, "sport", sport) == sport],
+            sport,
+        )
     _log_spend(db, client, "parlay scan", ",".join(result.sports)[:200])
 
     print(R.parlay_summary(result))
+    if banked:
+        coverage = db.prop_line_coverage()
+        print(f"Line history: +{banked} observation(s); "
+              f"{coverage['seen_twice']} of {coverage['lines']} line(s) now "
+              f"seen more than once "
+              f"(widest span {coverage['widest_span_hours']:.1f}h).")
+        moves = db.line_movements(
+            min_drift=cfg.parlay.min_line_drift,
+            books=cfg.parlay.pickem_books,
+        )
+        if moves:
+            print("\nLINES THAT MOVED WITHOUT THE BOOK FOLLOWING:")
+            for move in moves[:8]:
+                mins = f"{move.minutes:.0f}m" if move.minutes else "?"
+                print(f"  {move.drift:+.1%} in {mins:>5}  "
+                      f"{move.describe():<34} {move.book}")
+                print(f"        take {move.value_side}; fair "
+                      f"{move.fair_first:.1%} -> {move.fair_last:.1%}"
+                      + ("  [sharp book moved its line too]"
+                         if move.sharp_line_moved else ""))
     if not result.tickets:
         note = R.near_miss_note(result)
         if note:
@@ -2150,6 +2182,69 @@ def cmd_parlay_rosters(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_parlay_moves(cfg: Config, args) -> int:
+    """
+    What has moved since the history started, without spending a credit.
+
+    Reads only what earlier scans already banked, so it is free to run
+    as often as you like -- including right before placing, to check
+    that a move has not since been priced away.
+    """
+    db = Database(cfg.database)
+    coverage = db.prop_line_coverage(hours=args.hours)
+
+    if not coverage["observations"]:
+        print("No line history yet. It is recorded by `betedge parlay scan`,\n"
+              "so the first scan banks a baseline and the second is the\n"
+              "earliest one that can show a move.")
+        db.close()
+        return 0
+
+    print(f"{coverage['observations']:,} observation(s) of "
+          f"{coverage['lines']:,} line(s) in the last {args.hours:g}h.")
+    if not coverage["seen_twice"]:
+        # The distinction that matters: nothing moved, versus nothing was
+        # looked at twice. Only one of those is information.
+        print("\nNone has been seen more than once, so nothing can have "
+              "moved yet.\nRun the scan again closer to kickoff -- a move "
+              "needs two looks.")
+        db.close()
+        return 0
+
+    print(f"{coverage['seen_twice']:,} seen more than once "
+          f"(widest span {coverage['widest_span_hours']:.1f}h).\n")
+
+    moves = db.line_movements(
+        min_drift=args.min_drift, max_age_hours=args.hours,
+        sport=args.sport,
+        books=None if args.all_books else cfg.parlay.pickem_books,
+    )
+    if not moves:
+        print(f"Nothing drifted by {args.min_drift:.0%} or more. "
+              "The board is keeping up.")
+        db.close()
+        return 0
+
+    print(f"{len(moves)} line(s) moved without the book following:\n")
+    for move in moves[:args.limit]:
+        mins = f"{move.minutes:.0f}m" if move.minutes else "?"
+        star = "  <<<" if move.sharp_line_moved else ""
+        print(f"  {move.drift:+.1%} in {mins:>5}  {move.describe():<34} "
+              f"{move.book}{star}")
+        print(f"        take {move.value_side}; fair {move.fair_first:.1%} "
+              f"-> {move.fair_last:.1%} over {move.observations} look(s)")
+        if move.sharp_line_moved:
+            print(f"        the sharp book moved its line "
+                  f"{move.sharp_line_first:g} -> {move.sharp_line_last:g} "
+                  "and this one did not")
+    print("\n<<< marks the strong form: the sharp book physically moved "
+          "its number.\nA drift with the sharp line static can be price "
+          "noise; a drift with the sharp\nline relocated is news one venue "
+          "has priced and the other has not.")
+    db.close()
+    return 0
+
+
 def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
     """
     Print the payout table exactly as loaded, so it can be checked against
@@ -2596,6 +2691,24 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--player", nargs="+", metavar="NAME",
                    help="look up specific players")
     s.set_defaults(func=cmd_parlay_rosters)
+
+    s = psub.add_parser(
+        "moves",
+        help="pick'em lines the market has walked away from",
+        description="A pick'em book posts a projection and leaves it; the "
+                    "sharp market reprices continuously. This reports "
+                    "where the two have come apart, from history earlier "
+                    "scans already banked. Costs no credits.",
+    )
+    s.add_argument("--hours", type=float, default=48.0,
+                   help="how far back to look")
+    s.add_argument("--min-drift", type=float, default=0.04, dest="min_drift",
+                   help="e.g. 0.04 for 4 points of probability")
+    s.add_argument("--sport")
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("--all-books", action="store_true", dest="all_books",
+                   help="include every book, not just the pick'em ones")
+    s.set_defaults(func=cmd_parlay_moves)
 
     s = psub.add_parser(
         "verify-payouts",
