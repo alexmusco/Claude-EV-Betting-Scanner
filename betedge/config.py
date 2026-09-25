@@ -333,6 +333,19 @@ class NotifyConfig:
     telegram_token: str = ""        # or BETEDGE_TELEGRAM_TOKEN
     telegram_chat_id: str = ""      # or BETEDGE_TELEGRAM_CHAT_ID
 
+    # How far a pick'em line's fair probability must have drifted, with
+    # the book holding its number, before it is worth a buzz.
+    #
+    # Deliberately far above `parlay.min_line_drift`, which governs what
+    # the terminal LISTS. A 4-point drift is worth reading in a report;
+    # it is not worth a phone going off. 10 points is roughly "something
+    # happened" rather than "the market breathed".
+    #
+    # This number is a guess until there is a Sunday of history behind
+    # it. `betedge parlay moves --min-drift X` costs nothing to re-run at
+    # different thresholds, so tune it against what actually showed up
+    # rather than leaving it where I put it.
+    min_drift: float = 0.10
     # Only bets at least this good are worth a buzz. Deliberately higher
     # than the scan's own bar: the terminal can afford to show you a
     # marginal play, a phone cannot.

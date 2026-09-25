@@ -1305,6 +1305,94 @@ def notify_kalshi(cfg, db, quotes, now=None, dry_run=False) -> dict:
 # ---------------------------------------------------------------------
 
 
+def notify_moves(cfg, db, moves, now=None, dry_run=False) -> dict:
+    """
+    Push a pick'em line the market has walked away from.
+
+    The one alert in this tool that is genuinely time-critical. A bet at
+    +4% is still +4% in an hour; a line that is stale because news broke
+    twenty minutes ago is worth nothing the moment the book updates it.
+    So this pushes the DRIFT, not the level -- what changed and how fast,
+    because that is what says whether there is still time.
+
+    Suppression is keyed on the line, not the drift, so a line that keeps
+    moving does not buzz on every tick. It re-sends only when the drift
+    has grown materially further, which is the same rule a price
+    improvement gets elsewhere.
+    """
+    from . import notify as N
+
+    nc = cfg.notify
+    now = now or datetime.now(timezone.utc)
+    stats = {"sent": 0, "suppressed": 0, "below_bar": 0, "too_soon": 0,
+             "quiet": False, "errors": 0}
+    if not nc.enabled:
+        return stats
+
+    if N.in_quiet_hours(now.astimezone(), nc.quiet_start, nc.quiet_end):
+        stats["quiet"] = True
+        return stats
+
+    ranked = sorted(moves, key=lambda m: abs(m.drift), reverse=True)
+    for move in ranked[:nc.max_messages]:
+        if abs(move.drift) < nc.min_drift:
+            stats["below_bar"] += 1
+            continue
+        start = parse_timestamp(move.commence_time)
+        if start is not None:
+            minutes = (start - now).total_seconds() / 60.0
+            if minutes < nc.min_minutes_to_start:
+                # A stale line you cannot reach in time is not an edge.
+                stats["too_soon"] += 1
+                continue
+
+        fp = N.fingerprint("move", move.sport, move.event_id, move.market,
+                           move.selection, move.side, move.book, move.line)
+        wanted, _why = db.should_notify(
+            fp, abs(move.drift), now,
+            resend_after_hours=nc.resend_after_hours,
+            resend_on_price_gain=nc.resend_on_price_gain,
+        )
+        if not wanted:
+            stats["suppressed"] += 1
+            continue
+
+        mins = f"{move.minutes:.0f}m" if move.minutes else "?"
+        lines = [
+            f"{move.describe()}   take {move.value_side}",
+            f"{move.book}   fair {move.fair_first:.0%} -> "
+            f"{move.fair_last:.0%} in {mins}",
+        ]
+        if move.sharp_line_moved:
+            lines.append(
+                f"sharp book moved {move.sharp_line_first:g} -> "
+                f"{move.sharp_line_last:g}; this one did not")
+        if move.commence_time:
+            lines.append(f"starts {N._when(move.commence_time)}")
+        message = N.Message(
+            title=f"{move.drift:+.0%} drift  {move.describe()}",
+            body="\n".join(lines),
+            # A stale line is the one alert worth breaking through for.
+            priority=5 if move.sharp_line_moved else 4,
+            tags=["rotating_light"],
+        )
+        if dry_run:
+            print(f"  [dry run] {message.title}")
+            stats["sent"] += 1
+            continue
+        try:
+            provider = N.send(message, nc)
+        except Exception as exc:  # noqa: BLE001
+            stats["errors"] += 1
+            db.record_notification(fp, now, ev=move.drift, ok=False,
+                                   title=message.title, error=str(exc)[:500])
+            continue
+        stats["sent"] += 1
+        db.record_notification(fp, now, provider=provider, ev=move.drift,
+                               price=abs(move.drift), title=message.title)
+    return stats
+
+
 def notify_opportunities(cfg: Config, db, rows, now=None, spent=None,
                          session=None, dry_run=False) -> dict:
     """
@@ -1719,6 +1807,17 @@ def cmd_parlay_scan(cfg: Config, args) -> int:
                       f"{move.fair_first:.1%} -> {move.fair_last:.1%}"
                       + ("  [sharp book moved its line too]"
                          if move.sharp_line_moved else ""))
+            if cfg.notify.enabled and not args.no_notify:
+                stats = notify_moves(cfg, db, moves,
+                                     dry_run=args.dry_run_notify)
+                if stats["sent"]:
+                    print(f"\n  Pushed {stats['sent']} move(s) to your phone.")
+                elif stats["quiet"]:
+                    print("\n  Quiet hours: nothing sent.")
+                elif stats["below_bar"]:
+                    print(f"\n  {stats['below_bar']} below the "
+                          f"{cfg.notify.min_drift:.0%} push threshold "
+                          "(notify.min_drift).")
     if not result.tickets:
         note = R.near_miss_note(result)
         if note:
@@ -2646,6 +2745,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--ignore-budget", action="store_true",
                    help="ignore the daily credit allowance")
     s.add_argument("--hide-suspect", action="store_true")
+    s.add_argument("--no-notify", action="store_true",
+                   help="skip phone notifications for this run")
+    s.add_argument("--dry-run-notify", action="store_true",
+                   help="print what would be pushed without sending it")
     s.add_argument("--no-report", action="store_true")
     s.set_defaults(func=cmd_parlay_scan)
 

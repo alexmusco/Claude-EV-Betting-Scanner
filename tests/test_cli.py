@@ -949,3 +949,137 @@ class TestKalshiRaw:
         monkeypatch.setattr("betedge.kalshi.MarketData", Stub)
         assert cli.cmd_kalshi_raw(self.cfg(), self.args("NOPE")) == 1
         assert "neither a market nor an event" in capsys.readouterr().out
+
+
+class TestNotifyMoves:
+    """
+    The one alert here that is genuinely time-critical.
+
+    A bet at +4% is still +4% in an hour. A line that is stale because
+    news broke twenty minutes ago is worth nothing the moment the book
+    updates it, so the message pushes what CHANGED and how fast.
+    """
+
+    T0 = datetime(2026, 9, 27, 16, 0, tzinfo=timezone.utc)
+
+    def leg(self, selection, line=4.5, fair=0.50, sharp_line=4.5,
+            commence="2026-09-27T20:00:00Z"):
+        import types
+
+        return types.SimpleNamespace(
+            event_id="mia-sf", market="player_receptions",
+            selection=selection, side="Over", line=line, book="prizepicks",
+            book_price=None, fair_prob=fair, push_prob=0.0,
+            sharp_line=sharp_line, sharp_price_taken=1.95,
+            line_source="exact", commence_time=commence)
+
+    def moves(self, tmp_path, first, second, now=None):
+        from betedge.db import Database
+
+        db = Database(tmp_path / "t.db")
+        db.record_prop_lines(first, "americanfootball_nfl", observed_at=self.T0)
+        db.record_prop_lines(second, "americanfootball_nfl",
+                             observed_at=self.T0 + timedelta(minutes=20))
+        now = now or self.T0 + timedelta(minutes=25)
+        return db, db.line_movements(min_drift=0.04, now=now)
+
+    def cfg(self, **over):
+        import types
+
+        fields = dict(
+            enabled=True, provider="ntfy", quiet_start="", quiet_end="",
+            min_drift=0.10, max_messages=4, min_minutes_to_start=15.0,
+            resend_after_hours=12.0, resend_on_price_gain=0.03)
+        fields.update(over)
+        return types.SimpleNamespace(notify=types.SimpleNamespace(**fields))
+
+    def capture(self, monkeypatch):
+        sent = []
+        monkeypatch.setattr("betedge.notify.send",
+                            lambda m, c, **kw: (sent.append(m), "ntfy")[1])
+        return sent
+
+    def test_a_big_drift_is_pushed(self, tmp_path, monkeypatch):
+        sent = self.capture(monkeypatch)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.505)],
+                               [self.leg("A", fair=0.671, sharp_line=6.5)])
+        stats = cli.notify_moves(self.cfg(), db, moves,
+                                 now=self.T0 + timedelta(minutes=25))
+        assert stats["sent"] == 1
+        assert "Jauan" not in sent[0].body
+        assert "A Over 4.5" in sent[0].body
+        assert "take Over" in sent[0].body
+        assert "50% -> 67%" in sent[0].body
+
+    def test_the_strong_form_says_the_sharp_book_moved(self, tmp_path,
+                                                       monkeypatch):
+        sent = self.capture(monkeypatch)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.50)],
+                               [self.leg("A", fair=0.68, sharp_line=6.5)])
+        cli.notify_moves(self.cfg(), db, moves,
+                         now=self.T0 + timedelta(minutes=25))
+        assert "sharp book moved 4.5 -> 6.5" in sent[0].body
+        assert sent[0].priority == 5
+
+    def test_a_small_drift_is_below_the_push_bar(self, tmp_path, monkeypatch):
+        # Listed in the terminal at 4%, not worth a phone going off.
+        sent = self.capture(monkeypatch)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.512)],
+                               [self.leg("A", fair=0.560)])
+        stats = cli.notify_moves(self.cfg(), db, moves,
+                                 now=self.T0 + timedelta(minutes=25))
+        assert stats["sent"] == 0 and stats["below_bar"] == 1
+        assert sent == []
+
+    def test_the_same_line_does_not_buzz_twice(self, tmp_path, monkeypatch):
+        self.capture(monkeypatch)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.50)],
+                               [self.leg("A", fair=0.68, sharp_line=6.5)])
+        now = self.T0 + timedelta(minutes=25)
+        assert cli.notify_moves(self.cfg(), db, moves, now=now)["sent"] == 1
+        again = cli.notify_moves(self.cfg(), db, moves,
+                                 now=now + timedelta(minutes=1))
+        assert again["sent"] == 0 and again["suppressed"] == 1
+
+    def test_a_game_about_to_start_is_not_pushed(self, tmp_path, monkeypatch):
+        # A stale line you cannot reach in time is not an edge.
+        self.capture(monkeypatch)
+        db, moves = self.moves(
+            tmp_path,
+            [self.leg("A", fair=0.50, commence="2026-09-27T16:30:00Z")],
+            [self.leg("A", fair=0.68, sharp_line=6.5,
+                      commence="2026-09-27T16:30:00Z")])
+        stats = cli.notify_moves(self.cfg(), db, moves,
+                                 now=self.T0 + timedelta(minutes=25))
+        assert stats["sent"] == 0 and stats["too_soon"] == 1
+
+    def test_quiet_hours_hold_it_rather_than_dropping_it(self, tmp_path,
+                                                         monkeypatch):
+        self.capture(monkeypatch)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.50)],
+                               [self.leg("A", fair=0.68)])
+        now = (self.T0 + timedelta(minutes=25)).astimezone()
+        cfg = self.cfg(
+            quiet_start=(now - timedelta(hours=1)).strftime("%H:%M"),
+            quiet_end=(now + timedelta(hours=1)).strftime("%H:%M"))
+        stats = cli.notify_moves(cfg, db, moves,
+                                 now=self.T0 + timedelta(minutes=25))
+        assert stats["quiet"] and stats["sent"] == 0
+
+    def test_disabled_notifications_do_nothing(self, tmp_path, monkeypatch):
+        self.capture(monkeypatch)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.50)],
+                               [self.leg("A", fair=0.68)])
+        assert cli.notify_moves(self.cfg(enabled=False), db, moves,
+                                now=self.T0 + timedelta(minutes=25))["sent"] == 0
+
+    def test_a_dead_phone_does_not_raise(self, tmp_path, monkeypatch):
+        def explode(*a, **kw):
+            raise RuntimeError("phone is off")
+
+        monkeypatch.setattr("betedge.notify.send", explode)
+        db, moves = self.moves(tmp_path, [self.leg("A", fair=0.50)],
+                               [self.leg("A", fair=0.68)])
+        stats = cli.notify_moves(self.cfg(), db, moves,
+                                 now=self.T0 + timedelta(minutes=25))
+        assert stats["errors"] == 1 and stats["sent"] == 0
