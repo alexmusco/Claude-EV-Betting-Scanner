@@ -38,7 +38,7 @@ from . import pricing as P
 from . import report as R
 from .closing import capture_closing_lines, capture_parlay_closing_lines
 from .config import Config
-from .db import Database, parse_timestamp
+from .db import Database, LineMove, parse_timestamp
 from .markets import SPORTS, expand_sport_keys, markets_for
 from .oddsapi import OddsApiClient
 from .scan import _events_in_window, best_per_selection, cap_exposure, scan
@@ -1538,6 +1538,76 @@ def _minutes_to_start(row, now):
     return (start - now).total_seconds() / 60.0
 
 
+def _sample_message(kind: str):
+    """
+    A realistic alert, built by the REAL formatter from fabricated data.
+
+    The point is to rehearse the thing that will actually arrive, not a
+    stand-in for it. A test that hand-writes its own text proves only
+    that the phone can receive text -- which is exactly how a
+    notification reading "Stake 5" passed its own test for weeks.
+
+    Every sample opens with TEST on the FIRST LINE OF THE BODY. Not only
+    the title: a title is an HTTP header and can be dropped in transit,
+    which is the whole reason the bet moved into the body in the first
+    place. A fake alert that arrives without its label is a fake alert
+    someone acts on.
+    """
+    from datetime import timedelta
+
+    from . import notify as N
+    from . import report as R
+
+    soon = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+
+    if kind == "move":
+        move = LineMove(
+            sport="americanfootball_nfl", event_id="sample",
+            market="player_receptions", selection="Jauan Jennings",
+            side="Over", book="prizepicks", line=4.5,
+            first_seen=datetime.now(timezone.utc) - timedelta(minutes=20),
+            last_seen=datetime.now(timezone.utc),
+            fair_first=0.505, fair_last=0.671,
+            sharp_line_first=4.5, sharp_line_last=6.5,
+            commence_time=soon, observations=2,
+        )
+        body = "\n".join([
+            "TEST -- not a real bet",
+            f"{move.describe()}   take {move.value_side}",
+            f"{move.book}   fair {move.fair_first:.0%} -> "
+            f"{move.fair_last:.0%} in 20m",
+            f"sharp book moved {move.sharp_line_first:g} -> "
+            f"{move.sharp_line_last:g}; this one did not",
+            f"starts {N._when(move.commence_time)}",
+        ])
+        return N.Message(
+            title=f"TEST  {move.drift:+.0%} drift  {move.describe()}",
+            body=body, priority=5, tags=["rotating_light"])
+
+    if kind == "bet":
+        row = {
+            "id": 999, "selection": "Deebo Samuel", "side": "Over",
+            "line": 3.5, "soft_price": 2.10, "soft_book": "draftkings",
+            "ev": 0.042, "market": "player_receptions",
+            "home_team": "San Francisco 49ers",
+            "away_team": "Miami Dolphins", "commence_time": soon,
+        }
+        message = N.format_opportunity(row, stake=5, american=R.american)
+        return N.Message(
+            title=f"TEST  {message.title}",
+            body="TEST -- not a real bet\n" + message.body,
+            priority=message.priority, tags=message.tags)
+
+    return N.Message(
+        title="betedge test -- title channel OK",
+        body=("Body received.\n"
+              "The title above should read: "
+              "'betedge test -- title channel OK'.\n"
+              "If you cannot see that title, your phone is only showing "
+              "the body -- which is why bets must lead with the pick."),
+        tags=["white_check_mark"])
+
+
 def cmd_notify_test(cfg: Config, args) -> int:
     """Send one message, to prove the phone end of the chain works."""
     from . import notify as N
@@ -1551,15 +1621,10 @@ def cmd_notify_test(cfg: Config, args) -> int:
     # which stayed true on a phone where the title never arrived, so a
     # real bet showed up as one meaningless line and the test still
     # passed. Now the body tells you what you should ALSO be seeing.
-    message = N.Message(
-        title="betedge test -- title channel OK",
-        body=("Body received.\n"
-              "The title above should read: "
-              "'betedge test -- title channel OK'.\n"
-              "If you cannot see that title, your phone is only showing "
-              "the body -- which is why bets must lead with the pick."),
-        tags=["white_check_mark"],
-    )
+    message = _sample_message(getattr(args, "kind", "plain"))
+    if getattr(args, "show", False):
+        print(f"TITLE: {message.title}\n{message.body}")
+        return 0
     try:
         provider = N.send(message, cfg.notify)
     except Exception as exc:  # noqa: BLE001
@@ -2909,6 +2974,15 @@ def build_parser() -> argparse.ArgumentParser:
     s = nsub.add_parser("test", help="send one message to prove it works")
     s.add_argument("--force", action="store_true",
                    help="send even if notifications are disabled")
+    s.add_argument("--kind", choices=["plain", "bet", "move"],
+                   default="plain",
+                   help="plain: prove the chain works. bet: a sample +EV "
+                        "bet alert. move: a sample stale-line alert. The "
+                        "last two are built by the real formatter, so they "
+                        "look exactly like the real thing -- and each says "
+                        "TEST on its first body line.")
+    s.add_argument("--show", action="store_true",
+                   help="print it here instead of sending it")
     s.set_defaults(func=cmd_notify_test)
 
     s = nsub.add_parser("log", help="what has been pushed, and what failed")

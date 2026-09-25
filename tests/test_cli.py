@@ -1083,3 +1083,48 @@ class TestNotifyMoves:
         stats = cli.notify_moves(self.cfg(), db, moves,
                                  now=self.T0 + timedelta(minutes=25))
         assert stats["errors"] == 1 and stats["sent"] == 0
+
+
+class TestSampleNotifications:
+    """
+    Rehearsing the real alert, not a stand-in for it.
+
+    A test that hand-writes its own text proves only that a phone can
+    receive text -- which is exactly how a notification reading
+    "Stake 5" passed its own test for weeks.
+    """
+
+    def test_a_sample_bet_goes_through_the_real_formatter(self):
+        message = cli._sample_message("bet")
+        assert "Deebo Samuel Over 3.5" in message.body
+        assert "draftkings" in message.body
+        assert "+110" in message.body
+
+    def test_a_sample_move_carries_the_drift_and_the_side(self):
+        message = cli._sample_message("move")
+        assert "Jauan Jennings Over 4.5" in message.body
+        assert "take Over" in message.body
+        assert "50% -> 67%" in message.body
+        assert "sharp book moved 4.5 -> 6.5" in message.body
+
+    def test_a_sample_move_breaks_through(self):
+        assert cli._sample_message("move").priority == 5
+
+    def test_every_sample_says_TEST_on_the_first_body_line(self):
+        """
+        On the FIRST BODY LINE, not only in the title.
+
+        A title is an HTTP header and can be dropped in transit -- the
+        whole reason the bet moved into the body. A fake alert arriving
+        without its label is a fake alert someone acts on.
+        """
+        for kind in ("bet", "move"):
+            first = cli._sample_message(kind).body.split("\n")[0]
+            assert "TEST" in first, kind
+
+    def test_the_plain_sample_is_unchanged(self):
+        message = cli._sample_message("plain")
+        assert "title channel OK" in message.title
+
+    def test_an_unknown_kind_falls_back_to_plain(self):
+        assert "title channel OK" in cli._sample_message("nonsense").title
