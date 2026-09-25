@@ -105,6 +105,26 @@ products:
     # pick and one tie pays 1.5x, which no leg-count table can express, so
     # a 2-pick with a live push risk is priced slightly low here.
     same_game_may_reduce: true
+    # GOBLINS and DEMONS.
+    #
+    # PrizePicks posts alternate lines on the same stat: a goblin is an
+    # easier number that pays LESS, a demon a harder number that pays
+    # MORE. Neither settles on the ladder below.
+    #
+    # Left unset on purpose. These modifiers vary by pick, by sport and
+    # over time -- PrizePicks shows the actual multiplier on the pick
+    # itself -- so there is no single pair of numbers that could be
+    # written here truthfully. Until you fill them in, a ticket holding
+    # an alternate line is flagged and staked at zero rather than priced
+    # on the standard ladder, which would read a goblin's high hit rate
+    # as edge and its cut payout as nothing.
+    #
+    # To use them: read the multiplier off the pick in the app and set
+    # it here, then set verified_modifiers: true.
+    pick_modifiers:
+      verified_modifiers: false
+      goblin: null
+      demon: null
     payouts:
       2: [0, 0, 3.0]
       3: [0, 0, 0, 6.0]

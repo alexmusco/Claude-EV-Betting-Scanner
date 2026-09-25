@@ -575,6 +575,18 @@ class Leg:
     liquidity: float
     line_source: str = LINE_EXACT
     push_source: str = "half_line"
+    #: "standard", or "alternate" when the book posts more than one line
+    #: for this player and stat. PrizePicks calls the easier one a GOBLIN
+    #: and the harder one a DEMON, and they do NOT pay the standard
+    #: ladder -- a goblin pays less, a demon pays more. Pricing one as
+    #: standard reads its higher hit rate as edge and its reduced payout
+    #: as nothing, which manufactures an enormous fake edge on exactly
+    #: the picks a person is most tempted by.
+    variant: str = "standard"
+    #: What this pick does to the entry's payout, once the operator has
+    #: verified it. None means unknown, which is not the same as 1.0 and
+    #: must never be treated as it.
+    payout_multiplier: float | None = None
     #: The player's club, and where that came from. Carried together on
     #: purpose: a team with no provenance cannot be aged, and an entry that
     #: cannot be aged is one the correlation matrix should not trust.
@@ -788,6 +800,57 @@ def estimate_push_prob(
 # is not a foundation to build anything on. A ticket multiplies four of
 # them together, so if anything the case is stronger.
 # --------------------------------------------------------------------------
+
+
+def mark_alternate_lines(legs: Sequence[Leg], pickem_books) -> list[Leg]:
+    """
+    Flag every pick'em line that is one of several for the same stat.
+
+    A book posting two numbers on one player is posting a standard line
+    and an alternate -- PrizePicks names them GOBLIN (easier, pays less)
+    and DEMON (harder, pays more). Both settle on a modified payout, and
+    neither settles on the standard ladder every ticket here is scored
+    against.
+
+    That asymmetry is dangerous in one specific direction. A goblin has a
+    much HIGHER hit probability than the standard line, so a tool that
+    prices it as standard sees a 68% leg where the filter wants 52% and
+    reports a huge edge -- while the reduced payout that pays for that
+    hit rate is nowhere in the arithmetic. The bet that looks best on the
+    board is the one whose price the board is not using.
+
+    Which is standard and which is the alternate cannot be settled from
+    this side with any confidence, so this does not try. It marks the
+    whole group as `alternate` and lets the guard refuse to stake them
+    until the operator supplies a verified multiplier. Refusing a real
+    edge costs a bet; taking a fake one costs the bankroll and the
+    measurement.
+    """
+    books = {b.lower() for b in (pickem_books or ())}
+    groups: dict[tuple, list[Leg]] = {}
+    for leg in legs:
+        if (leg.book or "").lower() not in books:
+            continue
+        groups.setdefault(
+            (leg.book, leg.event_id, leg.market,
+             (leg.selection or "").lower(), (leg.side or "").lower()),
+            []).append(leg)
+
+    out = []
+    for leg in legs:
+        key = ((leg.book), leg.event_id, leg.market,
+               (leg.selection or "").lower(), (leg.side or "").lower())
+        group = groups.get(key)
+        if group and len({g.line for g in group}) > 1:
+            out.append(replace(
+                leg, variant="alternate",
+                flags=leg.flags + (
+                    f"alternate_line({len(group)} lines posted for this stat; "
+                    "goblin/demon payouts differ from the standard ladder)",
+                )))
+        else:
+            out.append(leg)
+    return out
 
 
 def build_legs(
@@ -1371,6 +1434,21 @@ def apply_guards(ticket: Ticket, cfg: Config) -> Ticket:
         # entry screen is the only place that answers it.
         flags.append("same_game_lineup_multiplier_may_be_cut(check the entry screen)")
 
+    unpriced = [lg for lg in ticket.legs
+                if lg.variant != "standard" and lg.payout_multiplier is None]
+    if unpriced:
+        # The dangerous direction: a goblin's higher hit rate reads as
+        # edge while its reduced payout reads as nothing, so the fake
+        # edge is largest on exactly the picks that look best. No stake
+        # until the operator supplies a verified multiplier.
+        names = ", ".join(lg.description for lg in unpriced[:3])
+        flags.append(
+            f"alternate_line_with_no_verified_payout({names}) -- a goblin "
+            "pays LESS and a demon pays MORE than the ladder this ticket "
+            "was scored on"
+        )
+        suspect = True
+
     for leg in ticket.legs:
         for f in leg.flags:
             flags.append(f"leg:{f}")
@@ -1910,6 +1988,7 @@ def scan_parlays(
                 )
             )
 
+    all_legs = mark_alternate_lines(all_legs, cfg.parlay.pickem_books)
     state.legs_built = len(all_legs)
     # Every leg, not just the ones that survive the filter. A leg at 51%
     # is worthless today and is the whole point tomorrow: it is the

@@ -1704,3 +1704,144 @@ class TestProbedNothing:
         ).rows[0]
         assert row.events_posted == 0
         assert row.probed_nothing
+
+
+class TestGoblinsAndDemons:
+    """
+    PrizePicks posts alternate lines that do NOT pay the standard ladder:
+    a GOBLIN is an easier number that pays less, a DEMON a harder number
+    that pays more.
+
+    The danger runs one way. A goblin has a much higher hit probability
+    than the standard line, so pricing it as standard reads that hit rate
+    as edge and the reduced payout as nothing -- which means the fake
+    edge is largest on exactly the pick a person is most drawn to.
+    """
+
+    def leg(self, selection, line, fair=0.51, book="prizepicks", **over):
+        from betedge.parlay import Leg
+
+        fields = dict(
+            event_id="mia-sf", sport="americanfootball_nfl",
+            commence_time=None, home_team="San Francisco 49ers",
+            away_team="Miami Dolphins", market="player_receptions",
+            selection=selection, side="Over", line=line, book=book,
+            book_price=None, book_last_update=None, fair_prob=fair,
+            push_prob=0.0, sharp_price_taken=1.95, sharp_price_other=1.95,
+            sharp_overround=0.04, devig_spread=0.0, fair_prob_by_method={},
+            sharp_last_update=None, sharp_line=line, market_tier="primary",
+            liquidity=0.8,
+        )
+        fields.update(over)
+        return Leg(**fields)
+
+    def test_several_lines_on_one_stat_are_all_marked_alternate(self):
+        from betedge.parlay import mark_alternate_lines
+
+        marked = mark_alternate_lines([
+            self.leg("Deebo Samuel", 3.5, 0.51),
+            self.leg("Deebo Samuel", 1.5, 0.79),
+            self.leg("Deebo Samuel", 6.5, 0.24),
+        ], ["prizepicks"])
+        assert {m.variant for m in marked} == {"alternate"}
+
+    def test_a_single_line_prop_is_left_alone(self):
+        from betedge.parlay import mark_alternate_lines
+
+        (marked,) = mark_alternate_lines(
+            [self.leg("Jauan Jennings", 4.5)], ["prizepicks"])
+        assert marked.variant == "standard"
+        assert marked.flags == ()
+
+    def test_two_players_are_not_each_others_alternates(self):
+        from betedge.parlay import mark_alternate_lines
+
+        marked = mark_alternate_lines([
+            self.leg("Deebo Samuel", 3.5),
+            self.leg("Jauan Jennings", 3.5),
+        ], ["prizepicks"])
+        assert {m.variant for m in marked} == {"standard"}
+
+    def test_over_and_under_are_not_each_others_alternates(self):
+        from betedge.parlay import mark_alternate_lines
+
+        marked = mark_alternate_lines([
+            self.leg("Deebo Samuel", 3.5, side="Over"),
+            self.leg("Deebo Samuel", 3.5, side="Under"),
+        ], ["prizepicks"])
+        assert {m.variant for m in marked} == {"standard"}
+
+    def test_a_sportsbooks_alternate_lines_are_not_touched(self):
+        # Only pick'em books have goblins. DraftKings posting several
+        # lines is an ordinary alternate market with its own price.
+        from betedge.parlay import mark_alternate_lines
+
+        marked = mark_alternate_lines([
+            self.leg("Deebo Samuel", 3.5, book="draftkings"),
+            self.leg("Deebo Samuel", 1.5, book="draftkings"),
+        ], ["prizepicks"])
+        assert {m.variant for m in marked} == {"standard"}
+
+    def test_the_flag_names_how_many_lines_were_posted(self):
+        from betedge.parlay import mark_alternate_lines
+
+        marked = mark_alternate_lines([
+            self.leg("Deebo Samuel", 3.5),
+            self.leg("Deebo Samuel", 1.5),
+        ], ["prizepicks"])
+        assert "2 lines posted" in marked[0].flags[0]
+
+    def ticket(self, legs, table, ev=0.22, stake=25.0):
+        """A scored Ticket, built directly: these tests exercise the
+        GUARD, not the scoring that normally produces one."""
+        from datetime import datetime, timezone
+
+        import numpy as np
+
+        from betedge import copula
+        from betedge.correlation import CorrelationMatrix
+        from betedge.parlay import Ticket
+
+        n = len(legs)
+        matrix = np.eye(n)
+        return Ticket(
+            legs=list(legs),
+            product=table.products["prizepicks_power"],
+            correlation=CorrelationMatrix(
+                matrix=matrix, pairs=[],
+                psd=copula.nearest_psd(matrix), min_sample=0),
+            joint_prob=0.3, joint_prob_se=0.001, joint_prob_independent=0.3,
+            hit_distribution=[0.0] * (n + 1),
+            ev=ev, ev_se=0.002, ev_independent=ev,
+            payout_all_hit=6.0, variance=1.0,
+            kelly_fraction=0.02, log_optimal_fraction=0.02,
+            recommended_stake=stake,
+            created_at=datetime.now(timezone.utc),
+        )
+
+    def test_an_unpriced_alternate_is_refused_a_stake(self, cfg, table):
+        """
+        The whole point. Until the operator supplies a verified
+        multiplier, a ticket holding a goblin is staked at zero rather
+        than scored on a ladder it will not settle on.
+        """
+        from betedge.parlay import apply_guards, mark_alternate_lines
+
+        legs = mark_alternate_lines([
+            self.leg("Deebo Samuel", 3.5, 0.51),
+            self.leg("Deebo Samuel", 1.5, 0.79),
+        ], ["prizepicks"])
+        guarded = apply_guards(self.ticket(legs, table), cfg)
+        assert guarded.suspect
+        assert guarded.recommended_stake == 0.0
+        assert any("alternate_line_with_no_verified_payout" in f
+                   for f in guarded.flags)
+
+    def test_a_standard_ticket_is_not_caught_by_this_guard(self, cfg, table):
+        from betedge.parlay import apply_guards
+
+        guarded = apply_guards(self.ticket(
+            [self.leg("Deebo Samuel", 3.5), self.leg("Jauan Jennings", 4.5)],
+            table, ev=0.04, stake=10.0), cfg)
+        assert not any("alternate_line_with_no_verified_payout" in f
+                       for f in guarded.flags)
