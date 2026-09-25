@@ -402,3 +402,83 @@ class TestRowsFromTheDatabase:
         obj = types.SimpleNamespace(selection="Deebo Samuel")
         assert N.field(obj, "selection") == "Deebo Samuel"
         assert N.field(obj, "missing", 7) == 7
+
+
+class TestRowsShapedLikeTheOpportunitiesTable:
+    """
+    Not just the right TYPE -- the right COLUMNS.
+
+    Fixing the sqlite3.Row accessor got real values into the message and
+    immediately exposed the next layer: the code was asking for column
+    names the `opportunities` table does not have. It stores `soft_book`,
+    not `book`, so the sportsbook printed as "?" beside a perfectly
+    correct price. It stores `home_team`/`away_team`, not `matchup`, so
+    the fixture line fell back to the raw market key and read "h2h".
+    """
+
+    def row(self, **over):
+        import sqlite3
+
+        fields = dict(
+            id=215, sport="americanfootball_nfl", event_id="e",
+            commence_time="2026-09-26T22:15:00Z",
+            home_team="San Francisco 49ers", away_team="Miami Dolphins",
+            market="h2h", selection="Luis Hernandez", line=None,
+            side="Luis Hernandez", soft_book="draftkings",
+            soft_price=1.52, ev=0.032, recommended_stake=15,
+        )
+        fields.update(over)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"CREATE TABLE o ({', '.join(fields)})")
+        conn.execute(f"INSERT INTO o VALUES ({','.join('?' * len(fields))})",
+                     tuple(fields.values()))
+        return conn.execute("SELECT * FROM o").fetchone()
+
+    def test_the_book_is_named_not_a_question_mark(self):
+        body = N.format_opportunity(self.row(), stake=15).body
+        assert "draftkings" in body
+        assert "?" not in body
+
+    def test_the_fixture_is_built_from_the_two_teams(self):
+        body = N.format_opportunity(self.row(), stake=15).body
+        assert "Miami Dolphins @ San Francisco 49ers" in body
+        assert "h2h" not in body
+
+    def test_a_moneyline_does_not_say_the_name_twice(self):
+        """`side` IS the competitor on an h2h, so it repeats `selection`."""
+        message = N.format_opportunity(self.row(), stake=15)
+        assert message.title.count("Luis Hernandez") == 1
+        assert message.body.split("\n")[0].count("Luis Hernandez") == 1
+
+    def test_a_prop_still_names_side_and_line(self):
+        message = N.format_opportunity(
+            self.row(market="player_receptions", selection="Deebo Samuel",
+                     side="Over", line=3.5), stake=5)
+        assert "Deebo Samuel Over 3.5" in message.body
+
+    def test_the_market_is_shown_only_when_it_adds_something(self):
+        # "Receptions" tells you something "Deebo Samuel Over 3.5" does
+        # not. "Moneyline" tells you nothing "Luis Hernandez" does not.
+        prop = N.format_opportunity(
+            self.row(market="player_receptions", selection="Deebo Samuel",
+                     side="Over", line=3.5), stake=5).body
+        assert "Receptions" in prop
+
+        moneyline = N.format_opportunity(self.row(), stake=15).body
+        assert "Moneyline" not in moneyline
+
+    def test_a_logged_bet_row_works_too(self):
+        # The `bets` table spells them `book` and `matchup`. Both names
+        # have to work, since both kinds of row reach this code.
+        body = N.format_opportunity(
+            self.row(soft_book="", book="fanduel",
+                     matchup="Green Bay Packers @ New York Jets"),
+            stake=15).body
+        assert "fanduel" in body
+        assert "Green Bay Packers @ New York Jets" in body
+
+    def test_the_digest_agrees_with_the_single_message(self):
+        row = self.row()
+        assert N.describe(row) in N.digest_line(row, stake=15)
+        assert "draftkings" in N.digest_line(row, stake=15)

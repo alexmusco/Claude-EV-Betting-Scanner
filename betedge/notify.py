@@ -311,6 +311,67 @@ def send(message: Message, cfg, session=None) -> str:
 # ---------------------------------------------------------------------------
 
 
+def describe(row) -> str:
+    """
+    What the bet IS, in the fewest words that stay unambiguous.
+
+    The side is dropped when it merely repeats the selection. On a
+    moneyline the "side" IS the competitor, so naming both produced
+    "Luis Hernandez Luis Hernandez" -- twice over, once in the title and
+    once in the body.
+    """
+    selection = str(field(row, "selection") or "").strip()
+    side = str(field(row, "side") or "").strip()
+    line = field(row, "line")
+    parts = [selection]
+    if side and side.casefold() != selection.casefold():
+        parts.append(side)
+    if line is not None:
+        parts.append(f"{float(line):g}")
+    text = " ".join(p for p in parts if p)
+    return text or str(field(row, "market") or "a bet")
+
+
+def book_of(row) -> str:
+    """
+    The soft book, under either name it goes by.
+
+    A scan row calls it `soft_book`; a logged bet calls it `book`.
+    Reading only `book` is why a notification showed "?" where the
+    sportsbook should be, with the price beside it perfectly correct.
+    """
+    return str(field(row, "book") or field(row, "soft_book") or "").strip()
+
+
+def matchup_of(row) -> str:
+    """
+    The fixture, built from the teams when there is no matchup column.
+
+    `opportunities` stores `home_team` and `away_team`; only a logged bet
+    has `matchup`. Asking for the column that is not there made the
+    message fall back to printing the raw market key -- "h2h" -- in the
+    place a human expects to see who is playing.
+    """
+    matchup = str(field(row, "matchup") or "").strip()
+    if matchup:
+        return matchup
+    away = str(field(row, "away_team") or "").strip()
+    home = str(field(row, "home_team") or "").strip()
+    return f"{away} @ {home}" if away and home else ""
+
+
+def context_of(row) -> str:
+    """The market and the fixture, where the market earns its place."""
+    from .markets import market_adds_information, pretty_market
+
+    market = str(field(row, "market") or "")
+    matchup = matchup_of(row)
+    if market and market_adds_information(market):
+        label = pretty_market(market)
+        return f"{label} \u00b7 {matchup}" if matchup else label
+    return matchup
+
+
 def _when(value) -> str:
     """
     A start time a person can read at a glance, in THEIR timezone.
@@ -347,12 +408,7 @@ def format_opportunity(row, stake=None, american=None) -> Message:
     notification that has to be scrolled is one that gets dismissed.
     """
     get = lambda k, d=None: field(row, k, d)  # noqa: E731
-    bits = [
-        str(get("selection") or "").strip(),
-        str(get("side") or "").strip(),
-        "" if get("line") is None else f"{float(get('line')):g}",
-    ]
-    what = " ".join(b for b in bits if b)
+    what = describe(row)
     price = get("soft_price")
     shown = american(price) if (american and price) else price
     ev = get("ev")
@@ -377,12 +433,12 @@ def format_opportunity(row, stake=None, american=None) -> Message:
         first = f"{first}   ({ev:+.1%})"
     body_lines = [first]
 
-    money = f"{get('book') or '?'} {shown}"
+    money = " ".join(str(x) for x in [book_of(row), shown] if x)
     if stake:
         money += f"   stake {stake:,.0f}"
     body_lines.append(money)
 
-    body_lines.append(str(get("matchup") or get("market") or ""))
+    body_lines.append(context_of(row))
     commence = get("commence_time")
     if commence:
         body_lines.append(f"starts {_when(commence)}")
@@ -402,17 +458,12 @@ def format_opportunity(row, stake=None, american=None) -> Message:
 def digest_line(row, stake=None, american=None) -> str:
     """One bet, compressed to a single readable line for a digest."""
     get = lambda k, d=None: field(row, k, d)  # noqa: E731
-    bits = [
-        str(get("selection") or "").strip(),
-        str(get("side") or "").strip(),
-        "" if get("line") is None else f"{float(get('line')):g}",
-    ]
-    what = " ".join(b for b in bits if b) or str(get("market") or "a bet")
+    what = describe(row)
     price = get("soft_price")
     shown = american(price) if (american and price) else price
     ev = get("ev")
     line = f"{ev:+.1%}  {what}" if ev is not None else what
-    tail = " ".join(str(x) for x in [get("book") or "", shown or ""] if x)
+    tail = " ".join(str(x) for x in [book_of(row), shown or ""] if x)
     if tail:
         line += f"  ({tail}"
         line += f", {stake:,.0f})" if stake else ")"
