@@ -311,3 +311,94 @@ class TestMessageContent:
     def test_a_digest_with_no_rows_still_says_something_useful(self):
         message = N.format_digest(9, 0.061)
         assert "9 bet(s)" in message.body
+
+
+class TestRowsFromTheDatabase:
+    """
+    Every test above passes DICTS. Production passes `sqlite3.Row`.
+
+    That gap hid a bug through two rounds of "fixing the notifications":
+    the accessor fell back to `getattr(row, key, default)` for anything
+    that was not a dict, and a sqlite3.Row supports neither attribute
+    access nor `.get`. So every field of every real row read as None.
+    The message came out as "Stake 5" -- the stake being the only value
+    not taken off the row -- and every bet hashed to the same dedupe
+    fingerprint, which suppressed every notification after the first.
+
+    These tests use the type the code actually gets.
+    """
+
+    def row(self, **over):
+        import sqlite3
+
+        fields = dict(
+            id=214, selection="Luis Hernandez", side="Over", line=1.5,
+            soft_price=2.10, book="draftkings", ev=0.042,
+            matchup="Miami Dolphins @ San Francisco 49ers",
+            market="player_receptions",
+            commence_time="2026-09-25T20:00:00Z",
+            sport="americanfootball_nfl", event_id="abc",
+        )
+        fields.update(over)
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cols = ", ".join(fields)
+        conn.execute(f"CREATE TABLE o ({cols})")
+        conn.execute(f"INSERT INTO o VALUES ({','.join('?' * len(fields))})",
+                     tuple(fields.values()))
+        return conn.execute("SELECT * FROM o").fetchone()
+
+    def test_the_message_names_the_bet(self):
+        from betedge import report as R
+
+        message = N.format_opportunity(self.row(), stake=5, american=R.american)
+        assert "Luis Hernandez" in message.title
+        assert "Luis Hernandez Over 1.5" in message.body.split("\n")[0]
+
+    def test_the_price_and_book_survive(self):
+        from betedge import report as R
+
+        body = N.format_opportunity(self.row(), stake=5,
+                                    american=R.american).body
+        assert "draftkings" in body
+        assert "+110" in body
+        assert "?" not in body.split("\n")[1]     # the "unknown book" marker
+
+    def test_the_matchup_and_log_command_survive(self):
+        message = N.format_opportunity(self.row(), stake=5)
+        assert "Miami Dolphins @ San Francisco 49ers" in message.body
+        assert "bet bet 214" in message.body
+
+    def test_two_different_bets_do_not_share_a_fingerprint(self):
+        """
+        The one that silently cost the most: identical fingerprints mean
+        the dedupe treats every new bet as a repeat of the first and
+        sends nothing.
+        """
+        a = N.opportunity_fingerprint(self.row(selection="Luis Hernandez"))
+        b = N.opportunity_fingerprint(self.row(selection="Deebo Samuel"))
+        assert a != b
+
+    def test_a_fingerprint_is_not_the_empty_one(self):
+        # All-None input still hashes to *something*; it just hashes to
+        # the same thing every time. Pin it against that exact value.
+        real = N.opportunity_fingerprint(self.row())
+        empty = N.fingerprint(None, None, None, None, None, None, None)
+        assert real != empty
+
+    def test_a_digest_line_names_the_bet(self):
+        from betedge import report as R
+
+        line = N.digest_line(self.row(), stake=5, american=R.american)
+        assert "Luis Hernandez Over 1.5" in line
+
+    def test_a_missing_column_falls_back_instead_of_raising(self):
+        row = self.row()
+        assert N.field(row, "no_such_column", "fallback") == "fallback"
+
+    def test_plain_objects_still_work(self):
+        import types
+
+        obj = types.SimpleNamespace(selection="Deebo Samuel")
+        assert N.field(obj, "selection") == "Deebo Samuel"
+        assert N.field(obj, "missing", 7) == 7

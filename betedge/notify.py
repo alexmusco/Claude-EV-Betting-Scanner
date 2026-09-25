@@ -67,6 +67,41 @@ class Message:
         return f"{self.title}\n{self.body}"
 
 
+def field(row, key, default=None):
+    """
+    One field out of a row, whatever kind of row it is.
+
+    This exists because of a bug that survived two rounds of "fixing the
+    notifications" and made every message useless:
+
+        get = row.get if isinstance(row, dict) else lambda k, d: getattr(row, k, d)
+
+    A `sqlite3.Row` is NOT a dict and does NOT support attribute access.
+    It answers `row["selection"]` and `row.keys()` and nothing else. So
+    that second branch returned the default for EVERY field of every row
+    the database produced -- which is every row this module is ever
+    called with in production. The notification body came out as "Stake
+    5" because the stake was the only value not read off the row.
+
+    Worse, the same accessor builds the dedupe fingerprint. Fed all
+    Nones, every bet hashed identically, so after the first notification
+    ever sent, every later bet looked like a repeat and was suppressed.
+
+    Tests missed it for the oldest reason there is: they passed dicts,
+    which take the branch that works.
+
+    `keys()` is the test rather than the type, because it is what both
+    dict and sqlite3.Row answer, and it keeps working for anything
+    mapping-like added later. Objects with attributes still work.
+    """
+    if hasattr(row, "keys"):
+        try:
+            return row[key] if key in row.keys() else default
+        except (KeyError, IndexError):
+            return default
+    return getattr(row, key, default)
+
+
 def fingerprint(*parts) -> str:
     """
     A stable identity for "this bet", independent of price.
@@ -83,7 +118,7 @@ def fingerprint(*parts) -> str:
 
 def opportunity_fingerprint(row) -> str:
     """The identity of a single-bet opportunity."""
-    get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
+    get = lambda k, d=None: field(row, k, d)  # noqa: E731
     return fingerprint(
         get("sport"), get("event_id"), get("market"),
         get("selection"), get("side"), get("line"), get("book"),
@@ -311,7 +346,7 @@ def format_opportunity(row, stake=None, american=None) -> Message:
     price, how much. The reasoning belongs in the report -- a phone
     notification that has to be scrolled is one that gets dismissed.
     """
-    get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
+    get = lambda k, d=None: field(row, k, d)  # noqa: E731
     bits = [
         str(get("selection") or "").strip(),
         str(get("side") or "").strip(),
@@ -366,7 +401,7 @@ def format_opportunity(row, stake=None, american=None) -> Message:
 
 def digest_line(row, stake=None, american=None) -> str:
     """One bet, compressed to a single readable line for a digest."""
-    get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
+    get = lambda k, d=None: field(row, k, d)  # noqa: E731
     bits = [
         str(get("selection") or "").strip(),
         str(get("side") or "").strip(),
