@@ -78,9 +78,18 @@ class TestDaily:
         assert client.max_credits_per_scan < 20000
 
     def test_an_exhausted_allowance_skips_scanning(self, wired, capsys):
+        # Spend more than the WHOLE cycle holds, not a fixed 5,000.
+        #
+        # A day's allowance is the credits left spread over the days
+        # left, so it GROWS as the cycle runs down: 5,000 exhausted it
+        # in the first week and stopped exhausting it in the last, and
+        # this test duly passed for three weeks a month. The code was
+        # right both times. Anything above the cycle total is over the
+        # allowance on every date, since the allowance is capped at
+        # what is actually there.
         cfg_path, client, tmp_path = wired
         db = Database(tmp_path / "t.db")
-        db.record_spend(5000, "scan")      # today's allowance already gone
+        db.record_spend(25000, "scan")     # > the 20,000 monthly total
         db.close()
         assert run(["--config", str(cfg_path), "daily", "--no-close"]) == 0
         out = capsys.readouterr().out
