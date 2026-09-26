@@ -287,6 +287,49 @@ class TestDuplicateBets:
             selection="Rashee Rice", side="Under", line=4.5,
             book="draftkings")
 
+    def test_the_same_prop_on_a_LATER_GAME_is_not_a_duplicate(self, tmp_path):
+        """
+        The one that a batch of pitcher props exposed.
+
+        A starter throws every fifth day and the book posts "Under 6.5
+        strikeouts" on him every time. Without the day in the identity,
+        deGrom's next start is indistinguishable from his last and the
+        guard refuses a perfectly good bet -- every week, all season.
+        """
+        db = Database(tmp_path / "t.db")
+        sep25 = datetime(2026, 9, 25, 18, 0, tzinfo=timezone.utc)
+        self.bet(db, sport="baseball_mlb", market="pitcher_strikeouts",
+                 selection="Jacob deGrom", line=6.5,
+                 commence_time=sep25.isoformat())
+
+        common = dict(sport="baseball_mlb", market="pitcher_strikeouts",
+                      selection="Jacob deGrom", side="Under", line=6.5,
+                      book="draftkings")
+        assert db.matching_bets(**common, commence_time=sep25.isoformat())
+        assert not db.matching_bets(
+            **common,
+            commence_time=(sep25 + timedelta(days=5)).isoformat())
+
+    def test_a_bet_with_no_game_date_uses_the_day_it_was_logged(self, tmp_path):
+        # Logging the same batch twice in one sitting is the accident
+        # the guard exists for, and both copies carry today's date.
+        db = Database(tmp_path / "t.db")
+        self.bet(db)
+        assert db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5,
+            book="draftkings")
+
+    def test_a_bet_logged_a_week_ago_does_not_block_todays(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        old = datetime.now(timezone.utc) - timedelta(days=7)
+        self.bet(db, placed_at=old)
+        # Same selection and line, but a different day's game.
+        assert not db.matching_bets(
+            sport="americanfootball_nfl", market="player_receptions",
+            selection="Rashee Rice", side="Under", line=4.5,
+            book="draftkings")
+
     def test_duplicate_groups_finds_what_is_already_there(self, tmp_path):
         db = Database(tmp_path / "t.db")
         self.bet(db)

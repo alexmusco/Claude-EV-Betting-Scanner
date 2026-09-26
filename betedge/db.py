@@ -1179,8 +1179,34 @@ class Database:
     # was two positions, `--allow-duplicate` says so out loud.
     # -------------------------------------------------------------
 
-    #: What makes two bets "the same bet".
+    #: What makes two bets "the same bet", before the day is added.
     IDENTITY_FIELDS = ("sport", "market", "selection", "side", "line", "book")
+
+    @staticmethod
+    def bet_day(row) -> str:
+        """
+        Which day's game a bet is on.
+
+        Part of a bet's identity, and the part it took a batch of
+        pitcher props to notice was missing. A starter throws every
+        fifth day and the book posts "Under 6.5 strikeouts" on him every
+        time, so without a day, Jacob deGrom's next start is
+        indistinguishable from his last and the guard refuses a
+        perfectly good bet. The same goes for any weekly NFL prop.
+
+        The game's own date where there is one, the date it was logged
+        otherwise. The fallback matters for a bet typed in by hand with
+        no `--commence`: logging the same batch twice in one sitting is
+        the accident this exists to catch, and both copies carry the
+        same logged date.
+        """
+        get = row.get if isinstance(row, dict) else (lambda k, d=None: row[k]
+                                                    if k in row.keys() else d)
+        for field in ("commence_time", "placed_at"):
+            stamp = parse_timestamp(get(field))
+            if stamp is not None:
+                return stamp.date().isoformat()
+        return datetime.now(timezone.utc).date().isoformat()
 
     @staticmethod
     def bet_identity(row) -> tuple:
@@ -1195,7 +1221,8 @@ class Database:
                 return float(value)
             return " ".join(str(value).strip().lower().split())
 
-        return tuple(norm(get(f)) for f in Database.IDENTITY_FIELDS)
+        return tuple(norm(get(f)) for f in Database.IDENTITY_FIELDS) + (
+            Database.bet_day(row),)
 
     def matching_bets(self, **fields) -> list[sqlite3.Row]:
         """

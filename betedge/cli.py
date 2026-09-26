@@ -592,7 +592,8 @@ def cmd_bet(cfg: Config, args) -> int:
     if args.opportunity_id is not None:
         opp = db.get_opportunity(args.opportunity_id)
         if opp is not None:
-            for field in ("sport", "market", "selection", "side", "line"):
+            for field in ("sport", "market", "selection", "side", "line",
+                          "commence_time"):
                 identity.setdefault(field, opp[field])
             identity.setdefault("book", opp["soft_book"])
     existing = db.matching_bets(**identity)
