@@ -9,7 +9,28 @@ from typing import Any
 
 import yaml
 
+#: The template that ships with betedge. Version controlled, and every
+#: update can change it.
 DEFAULT_CONFIG_PATH = Path("config.yaml")
+
+#: YOUR config, checked first.
+#:
+#: Outside version control on purpose, for the same reason the payout
+#: ladders are: `config.yaml` is tracked AND meant to be edited, which
+#: makes every `git pull` that touches it a merge conflict on the file
+#: holding your ntfy topic, your bankroll and your API key. Dropping a
+#: copy under the gitignored data/ directory ends that -- updates change
+#: the template, your settings are never in the way.
+USER_CONFIG_PATH = Path("data") / "config.yaml"
+
+
+def resolve_config_path(path=None) -> tuple[Path, bool]:
+    """Explicit path, else your own copy, else the shipped template."""
+    if path:
+        return Path(path), True
+    if USER_CONFIG_PATH.exists():
+        return USER_CONFIG_PATH, True
+    return DEFAULT_CONFIG_PATH, False
 PROFILES_PATH = Path(__file__).parent / "data" / "profiles.yaml"
 
 #: Config sections a profile may reach into, field by field.
@@ -464,9 +485,13 @@ class Config:
     database: str = "data/betedge.db"
     reports_dir: str = "reports"
 
+    #: Where the settings actually came from, and whether it was yours.
+    source_path: str = ""
+    is_user_config: bool = False
+
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":
-        path = Path(path or DEFAULT_CONFIG_PATH)
+        path, is_user = resolve_config_path(path)
         raw: dict[str, Any] = {}
         if path.exists():
             raw = yaml.safe_load(path.read_text()) or {}
@@ -493,6 +518,8 @@ class Config:
             profiles=load_profiles(path),
             database=raw.get("database", "data/betedge.db"),
             reports_dir=raw.get("reports_dir", "reports"),
+            source_path=str(path),
+            is_user_config=is_user,
         )
 
     def apply_profile(self, name: str, profiles: dict | None = None) -> list[ProfileChange]:

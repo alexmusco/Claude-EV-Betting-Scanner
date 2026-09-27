@@ -2188,6 +2188,50 @@ def cmd_parlay_correlations(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_config_init(cfg: Config, args) -> int:
+    """
+    Copy the settings somewhere `git pull` can never collide with them.
+
+    `config.yaml` is version controlled AND meant to be edited, which is
+    a combination that guarantees trouble: the moment an update touches
+    it, git refuses to merge and the file it is arguing about is the one
+    holding your ntfy topic, your bankroll and your API key. The payout
+    ladders solved this by living outside version control; settings get
+    the same treatment.
+    """
+    from .config import DEFAULT_CONFIG_PATH, USER_CONFIG_PATH
+
+    target = USER_CONFIG_PATH
+    if target.exists() and not args.force:
+        print(f"{target} already exists -- leaving it alone.\n"
+              "It is already used in preference to the shipped template.\n"
+              "Pass --force to overwrite it from the template.")
+        return 0
+    source = Path(args.source) if args.source else DEFAULT_CONFIG_PATH
+    if not source.exists():
+        print(f"{source} does not exist, so there is nothing to copy.")
+        return 1
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# YOUR settings. Copied from the betedge template and used in\n"
+        "# preference to it, so `git pull` can never collide with them.\n"
+        "#\n"
+        "# Anything absent here falls back to the built-in default, so\n"
+        "# this may be trimmed to only what you actually change.\n"
+        "\n"
+    )
+    target.write_text(header + source.read_text())
+    print(
+        f"Wrote {target} from {source}.\n\n"
+        "It is gitignored and used in preference to the shipped template\n"
+        "from now on. Edit that file, not config.yaml -- an update can\n"
+        "change the template at any time, and yours will never be in the\n"
+        "way of a pull again."
+    )
+    return 0
+
+
 def cmd_profiles(cfg: Config, args) -> int:
     """List the named override bundles and exactly what each one changes."""
     if not cfg.profiles:
@@ -2928,6 +2972,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--void", type=int, default=0, metavar="N",
                    help="legs that pushed and shrank the entry")
     s.set_defaults(func=cmd_parlay_settle)
+
+    s = sub.add_parser(
+        "config-init",
+        help="copy settings where git pull cannot collide with them",
+        description="config.yaml is version controlled AND meant to be "
+                    "edited, so an update that touches it blocks your "
+                    "pull. This puts your settings outside version "
+                    "control, where the payout ladders already live.",
+    )
+    s.add_argument("--source", metavar="FILE",
+                   help="copy from this file instead of the template")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite an existing copy")
+    s.set_defaults(func=cmd_config_init)
 
     p_kalshi = sub.add_parser(
         "kalshi", help="price Kalshi ladders against the sharp line"

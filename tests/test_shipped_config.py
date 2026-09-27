@@ -325,3 +325,77 @@ class TestRosterSection:
                 or market.startswith("player_pass_")
                 or market == "player_total_saves"
             ), market
+
+
+class TestYourOwnConfigFile:
+    """
+    `config.yaml` is version controlled AND meant to be edited.
+
+    That combination guarantees trouble: the moment an update touches it,
+    git refuses to merge, and the file it is arguing about is the one
+    holding the ntfy topic, the bankroll and the API key. The payout
+    ladders solved this by living outside version control; settings get
+    the same treatment.
+    """
+
+    def test_a_user_copy_is_preferred_over_the_template(self, tmp_path,
+                                                        monkeypatch):
+        from betedge import config as C
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yaml").write_text("bankroll:\n  amount: 100\n")
+        mine = tmp_path / "data" / "config.yaml"
+        mine.parent.mkdir()
+        mine.write_text("bankroll:\n  amount: 999\n")
+
+        cfg = C.Config.load()
+        assert cfg.is_user_config
+        assert cfg.bankroll.amount == 999
+
+    def test_the_template_is_used_when_there_is_no_copy(self, tmp_path,
+                                                        monkeypatch):
+        from betedge import config as C
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yaml").write_text("bankroll:\n  amount: 100\n")
+        cfg = C.Config.load()
+        assert not cfg.is_user_config
+        assert cfg.bankroll.amount == 100
+
+    def test_an_explicit_path_beats_both(self, tmp_path, monkeypatch):
+        from betedge import config as C
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yaml").write_text("bankroll:\n  amount: 100\n")
+        mine = tmp_path / "data" / "config.yaml"
+        mine.parent.mkdir()
+        mine.write_text("bankroll:\n  amount: 999\n")
+        named = tmp_path / "named.yaml"
+        named.write_text("bankroll:\n  amount: 7\n")
+
+        assert C.Config.load(named).bankroll.amount == 7
+
+    def test_the_user_path_is_inside_the_gitignored_directory(self):
+        # /data/ is gitignored, which is the entire point: a settings
+        # file that git never sees can never block a pull.
+        from betedge.config import USER_CONFIG_PATH
+
+        assert USER_CONFIG_PATH.parts[0] == "data"
+
+    def test_config_init_writes_it_and_will_not_clobber(self, tmp_path,
+                                                        monkeypatch, capsys):
+        import types
+
+        from betedge import cli
+        from betedge.config import Config
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "config.yaml").write_text("bankroll:\n  amount: 100\n")
+        args = types.SimpleNamespace(source=None, force=False)
+
+        assert cli.cmd_config_init(Config(), args) == 0
+        assert (tmp_path / "data" / "config.yaml").exists()
+
+        capsys.readouterr()
+        assert cli.cmd_config_init(Config(), args) == 0
+        assert "already exists" in capsys.readouterr().out
