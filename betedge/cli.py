@@ -2559,9 +2559,13 @@ def _init_payouts(cfg: Config) -> int:
         f"Wrote {target}.\n\n"
         "It is used in preference to the shipped file from now on, and it is\n"
         "gitignored, so your numbers survive every update.\n\n"
-        "Now open your accounts and correct it. Check the 3-pick first --\n"
-        "PrizePicks pays 5x and Underdog 6x on the shipped numbers, which is a\n"
-        "3.5-point difference in the hit rate each one needs."
+        "Now open your accounts and correct it. Start with UNDERDOG: its\n"
+        "ladders here have never been checked against a real account, while\n"
+        "PrizePicks' were read off the operator's published page.\n\n"
+        "A 3-pick is the row to look at hardest. It is where a wrong\n"
+        "multiplier costs the most: 5x against 6x moves the hit rate the\n"
+        "structure needs by nearly three and a half points, which is the\n"
+        "difference between a bet appearing and not."
     )
     return 0
 
