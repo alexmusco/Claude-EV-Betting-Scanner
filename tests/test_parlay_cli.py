@@ -235,11 +235,35 @@ class TestVerifyPayoutsCommand:
         assert "5/5: 20x" in out
 
     def test_it_says_loudly_what_is_unverified(self, wired, capsys):
+        """
+        The nag has to fire for a ladder that can actually price a
+        ticket, so this configures a book whose numbers are unchecked.
+        """
+        import yaml
+
         cfg_path, _client, _tmp = wired
+        raw = yaml.safe_load(cfg_path.read_text())
+        raw.setdefault("parlay", {})["pickem_books"] = ["prizepicks",
+                                                        "underdog"]
+        cfg_path.write_text(yaml.safe_dump(raw))
         run(["--config", str(cfg_path), "parlay", "verify-payouts"])
         out = capsys.readouterr().out
         assert "NOT VERIFIED" in out
         assert "CHECK THESE BEFORE TRUSTING ANY EV NUMBER" in out
+
+    def test_a_ladder_for_a_book_you_do_not_scan_is_not_nagged_about(
+            self, wired, capsys):
+        """
+        A product for a book that is not configured cannot affect any EV,
+        and a warning that fires when nothing is wrong teaches the reader
+        to skip the ones that matter.
+        """
+        cfg_path, _client, _tmp = wired
+        run(["--config", str(cfg_path), "parlay", "verify-payouts"])
+        out = capsys.readouterr().out
+        assert "Not in use, so not checked" in out
+        assert "underdog_standard" in out           # still listed
+        assert "CHECK THESE BEFORE TRUSTING ANY EV NUMBER" not in out
 
     def test_it_states_the_break_even_each_structure_needs(self, wired, capsys):
         cfg_path, _client, _tmp = wired
@@ -264,7 +288,7 @@ class TestVerifyPayoutsCommand:
         cfg_path.write_text(yaml.safe_dump(cfg))
         run(["--config", str(cfg_path), "parlay", "verify-payouts"])
         out = capsys.readouterr().out
-        assert "Every product is marked verified." in out
+        assert "Every product in use is marked verified." in out
         assert "2026-09-15" in out
 
 
@@ -1166,7 +1190,7 @@ class TestPayoutsInit:
         cfg_path.write_text(yaml.safe_dump(cfg))
         run(["--config", str(cfg_path), "parlay", "verify-payouts"])
         out = capsys.readouterr().out
-        assert "Every product is marked verified." in out
+        assert "Every product in use is marked verified." in out
 
     def test_an_edited_ladder_is_marked_edited(self, wired, tmp_path, monkeypatch, capsys):
         # Without this the verification loop has no feedback: you change a

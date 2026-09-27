@@ -51,6 +51,11 @@ products:
   # so two legs that describe the same underlying event are paid as though
   # they were independent.
   # -----------------------------------------------------------------------
+  # NOT IN USE. Kept as a reference ladder, not as a statement that you
+  # bet here: `parlay.pickem_books` decides what is actually scanned, and
+  # it lists PrizePicks only. These numbers have never been read off a
+  # real Underdog account, which is why they stay `verified: false` --
+  # put them back in `pickem_books` once they have been.
   underdog_standard:
     book: underdog
     kind: pickem

@@ -2488,10 +2488,26 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
             )
         print()
 
-    if table.unverified:
+    # Only nag about ladders this configuration can actually build a
+    # ticket from. A product for a book you do not scan cannot affect an
+    # EV, and a warning that fires when nothing is wrong is how a reader
+    # learns to skip the ones that matter. Dropping a book from
+    # `pickem_books` is therefore enough to retire its ladder -- no need
+    # to go and edit a gitignored file you may not even remember having.
+    in_use = {b.lower() for b in cfg.parlay.pickem_books}
+    in_use.add((cfg.books.sharp or "").lower())
+    in_use.update(b.lower() for b in cfg.books.soft)
+    idle = [k for k, pr in table.products.items()
+            if (pr.book or "").lower() not in in_use]
+    if idle:
+        print(f"Not in use, so not checked: {', '.join(sorted(idle))}\n"
+              f"(no book of theirs is in `books` or `parlay.pickem_books`)\n")
+
+    live_unverified = [k for k in table.unverified if k not in idle]
+    if live_unverified:
         print(
             "CHECK THESE BEFORE TRUSTING ANY EV NUMBER:\n  "
-            + ", ".join(table.unverified)
+            + ", ".join(live_unverified)
         )
         if table.is_user_copy:
             print(
@@ -2499,22 +2515,27 @@ def cmd_parlay_verify_payouts(cfg: Config, args) -> int:
                 f"5-pick actually pay\nin your state, edit {table.path}\n"
                 "to match, and set `verified: true` on the ones you checked."
             )
-        else:
-            # Never send anyone to edit the shipped file: it is version
-            # controlled, so their verified numbers would collide with the
-            # next pull -- a merge conflict on the one input the tool most
-            # needs them to get right.
-            print(
-                "\nThese are the SHIPPED defaults, inside the repository. Do "
-                "not edit them there --\nthe next `git pull` would collide "
-                "with your numbers. Make your own copy first:\n\n"
-                "    betedge parlay verify-payouts --init\n\n"
-                f"That writes {P.USER_PAYOUTS_PATH} (gitignored, alongside "
-                "your database),\nwhich is then used in preference to the "
-                "shipped file."
-            )
     else:
-        print("Every product is marked verified.")
+        print("Every product in use is marked verified.")
+
+    if not table.is_user_copy:
+        # Said whether or not anything is unverified. Never send anyone to
+        # edit the shipped file: it is version controlled, so their
+        # verified numbers would collide with the next pull -- a merge
+        # conflict on the one input the tool most needs them to get right.
+        # That was previously only mentioned when something was already
+        # unverified, which is exactly the reader who has been told the
+        # least and needs it most: the one whose numbers happen to be fine
+        # today and who will go and edit the wrong file tomorrow.
+        print(
+            "\nThese are the SHIPPED defaults, inside the repository. Do "
+            "not edit them there --\nthe next `git pull` would collide "
+            "with your numbers. Make your own copy first:\n\n"
+            "    betedge parlay verify-payouts --init\n\n"
+            f"That writes {P.USER_PAYOUTS_PATH} (gitignored, alongside "
+            "your database),\nwhich is then used in preference to the "
+            "shipped file."
+        )
 
     if untouched:
         print(

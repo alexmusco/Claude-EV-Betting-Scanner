@@ -106,7 +106,7 @@ class ApiConfig:
 @dataclass
 class BooksConfig:
     sharp: str = "pinnacle"
-    soft: list[str] = field(default_factory=lambda: ["draftkings", "underdog"])
+    soft: list[str] = field(default_factory=lambda: ["draftkings"])
 
     @property
     def all(self) -> list[str]:
@@ -200,7 +200,7 @@ class ParlayConfig:
     #: listing both keeps the two sets of tickets separate and priced on
     #: their own ladders rather than blended.
     products: list[str] = field(
-        default_factory=lambda: ["prizepicks_power", "underdog_standard"]
+        default_factory=lambda: ["prizepicks_power", "prizepicks_flex"]
     )
     # Override the shipped data files. None uses what ships with betedge.
     payouts_path: str | None = None
@@ -276,8 +276,16 @@ class ParlayConfig:
     max_interpolation_distance: float = 1.0
 
     # Books whose legs are fixed-multiplier pick'em selections.
+    #
+    # PrizePicks only. Underdog was dropped because its ladders had never
+    # been checked against a real account, and an unverified multiplier
+    # is not a small error: the whole EV of a pick'em ticket is the
+    # payout times a probability, so a wrong payout is a wrong answer
+    # with no symptom. Add "underdog" back here once its numbers have
+    # been read off the app -- the shipped ladders are still in git
+    # history if you want them as a starting point.
     pickem_books: list[str] = field(
-        default_factory=lambda: ["prizepicks", "underdog"]
+        default_factory=lambda: ["prizepicks"]
     )
     # Push probability to assume on an integer line when Pinnacle does not
     # price both surrounding half-lines. Flagged wherever it is used.

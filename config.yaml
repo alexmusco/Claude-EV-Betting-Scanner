@@ -284,24 +284,22 @@ parlay:
   # there means their estimate is wrong rather than that correlation
   # exists. Far fewer hits, lower confidence, and not what this is for.
   #
-  # Add the flex ladders too if you enter those; they are a genuinely
-  # different bet, not a variant:
-  #   - prizepicks_flex
-  #   - underdog_flex
+  # Power and Flex are genuinely different bets, not variants of each
+  # other, so both are listed and each is scored on its own ladder.
   products:
     - prizepicks_power
-    - underdog_standard
+    - prizepicks_flex
 
-  # Books whose legs are fixed-multiplier pick'em selections. The Odds API
-  # carries Underdog; nothing here is scraped.
-  # Books whose legs are fixed-multiplier pick'em selections. Both are
-  # listed so whichever one The Odds API actually serves you produces
-  # tickets; a book it does not carry simply contributes no legs, and the
-  # scan says so by name rather than leaving you to wonder why a board
-  # came back empty.
+  # Books whose legs are fixed-multiplier pick'em selections.
+  #
+  # PrizePicks only. Underdog was dropped because its ladders had never
+  # been checked against a real account, and an unverified multiplier is
+  # not a small error: a pick'em ticket's whole EV is a payout times a
+  # probability, so a wrong payout is a wrong answer with no symptom to
+  # notice. Add it back once its numbers have been read off the app --
+  # the ladders are in git history to start from.
   pickem_books:
     - prizepicks
-    - underdog
 
   # Monte Carlo. The seed is fixed so a re-run does not reshuffle the
   # ranking. 200k draws puts the standard error on a 20x ticket's EV at

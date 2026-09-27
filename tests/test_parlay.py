@@ -1464,10 +1464,11 @@ class TestCoverageByBook:
 
 class TestBothPickemBooks:
     """
-    Legs are matched to a product by book, so configuring both sites keeps
-    the two sets of tickets separate and priced on their own ladders. A
-    PrizePicks 3-pick pays 5x and an Underdog 3-pick pays 6x — blending
-    them would hide a 3.5-point difference in the hit rate each needs.
+    Legs are matched to a product by BOOK, so two sites configured at once
+    keep their tickets separate and each priced on its own ladder rather
+    than blended. That machinery still has to work even though only
+    PrizePicks is configured today -- it is what makes adding a book back
+    a config change rather than a code change.
     """
 
     def both(self, pcfg, priors, table):
@@ -1482,13 +1483,27 @@ class TestBothPickemBooks:
         products = [table.get("prizepicks_power"), table.get("underdog_standard")]
         return P.build_tickets(legs, products, pcfg, priors, now=NOW)
 
-    def test_both_books_are_configured_by_default(self):
+    def test_only_prizepicks_is_configured_by_default(self):
+        """
+        Underdog's ladders have never been read off a real account, and a
+        pick'em ticket's whole EV is a payout times a probability -- so an
+        unverified multiplier is a wrong answer with no symptom. It stays
+        out of the default until someone checks it.
+        """
         from betedge.config import Config
 
         cfg = Config()
-        assert set(cfg.parlay.pickem_books) == {"prizepicks", "underdog"}
-        assert "prizepicks_power" in cfg.parlay.products
-        assert "underdog_standard" in cfg.parlay.products
+        assert set(cfg.parlay.pickem_books) == {"prizepicks"}
+        assert all(p.startswith("prizepicks") for p in cfg.parlay.products)
+
+    def test_the_ladders_are_still_shipped_for_when_it_comes_back(self):
+        # Out of the config, not deleted: the table is a library of known
+        # ladders, and `pickem_books` is what decides what gets scanned.
+        from betedge.parlay import PayoutTable
+
+        table = PayoutTable.load()
+        assert "underdog_standard" in table.products
+        assert "underdog_standard" in table.unverified
 
     def test_tickets_are_produced_for_each_book(self, pcfg, priors, table):
         books = {t.product.book for t in self.both(pcfg, priors, table)}
