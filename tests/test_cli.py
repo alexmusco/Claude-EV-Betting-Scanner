@@ -1128,3 +1128,71 @@ class TestSampleNotifications:
 
     def test_an_unknown_kind_falls_back_to_plain(self):
         assert "title channel OK" in cli._sample_message("nonsense").title
+
+
+class TestKickoffWindow:
+    """
+    The window that makes a dumb timer smart.
+
+    Run every five minutes from cron, this spends nothing almost all day:
+    the event list is a FREE call, so the overwhelmingly common answer --
+    no game is close to kickoff -- is reached for zero credits. What it
+    brackets is not a guess: NFL inactive lists publish exactly ninety
+    minutes before kickoff, which is the one moment in the week a sharp
+    book is certain to be repricing.
+    """
+
+    NOW = datetime(2026, 9, 27, 16, 0, tzinfo=timezone.utc)
+
+    def event(self, minutes_out, away="Miami Dolphins",
+              home="San Francisco 49ers"):
+        return {
+            "id": f"e{minutes_out}", "away_team": away, "home_team": home,
+            "commence_time": (
+                self.NOW + timedelta(minutes=minutes_out)).isoformat(),
+        }
+
+    def test_a_game_inside_the_window_is_picked_up(self):
+        found = cli.games_in_window([self.event(90)], 120, 60, now=self.NOW)
+        assert len(found) == 1
+        assert found[0][1] == pytest.approx(90.0)
+
+    def test_a_game_too_far_out_is_not(self):
+        assert cli.games_in_window([self.event(300)], 120, 60,
+                                   now=self.NOW) == []
+
+    def test_a_game_about_to_kick_off_is_not(self):
+        # Past the near edge: the lines are set and there is no time to act.
+        assert cli.games_in_window([self.event(20)], 120, 60,
+                                   now=self.NOW) == []
+
+    def test_a_game_already_started_is_not(self):
+        assert cli.games_in_window([self.event(-30)], 120, 60,
+                                   now=self.NOW) == []
+
+    def test_the_edges_are_inclusive(self):
+        assert cli.games_in_window([self.event(120)], 120, 60, now=self.NOW)
+        assert cli.games_in_window([self.event(60)], 120, 60, now=self.NOW)
+
+    def test_the_default_window_brackets_the_inactive_report(self):
+        """
+        Inactives publish at T-90. A window that does not contain it is a
+        window pointed at nothing in particular.
+        """
+        assert cli.games_in_window([self.event(90)], 120, 60, now=self.NOW)
+
+    def test_the_soonest_game_comes_first(self):
+        found = cli.games_in_window(
+            [self.event(110), self.event(65), self.event(95)],
+            120, 60, now=self.NOW)
+        assert [round(m) for _e, m in found] == [65, 95, 110]
+
+    def test_an_event_with_no_kickoff_time_is_skipped_not_fatal(self):
+        assert cli.games_in_window(
+            [{"id": "x"}, self.event(90)], 120, 60, now=self.NOW) != []
+
+    def test_a_whole_sunday_slate_narrows_to_the_games_in_range(self):
+        slate = [self.event(m) for m in
+                 (30, 65, 90, 118, 180, 240, 400)]
+        found = cli.games_in_window(slate, 120, 60, now=self.NOW)
+        assert [round(m) for _e, m in found] == [65, 90, 118]

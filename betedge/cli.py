@@ -2391,6 +2391,126 @@ def cmd_parlay_rosters(cfg: Config, args) -> int:
     return 0
 
 
+def games_in_window(events, before_minutes: float, after_minutes: float,
+                    now=None) -> list[tuple]:
+    """
+    Which events are inside the kickoff window right now.
+
+    Returns (event, minutes_to_start), soonest first. The window is
+    expressed in minutes BEFORE kickoff, so `before=120, after=60` means
+    "between two hours and one hour out".
+    """
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for event in events:
+        start = parse_timestamp(event.get("commence_time"))
+        if start is None:
+            continue
+        minutes = (start - now).total_seconds() / 60.0
+        if after_minutes <= minutes <= before_minutes:
+            out.append((event, minutes))
+    out.sort(key=lambda pair: pair[1])
+    return out
+
+
+def cmd_parlay_watch(cfg: Config, args) -> int:
+    """
+    Scan only when a game is in its kickoff window, and cost nothing
+    otherwise.
+
+    The point is to make a dumb timer smart. Run this every five minutes
+    from cron and it spends nothing almost all day: the event list is a
+    FREE call, so the overwhelmingly common answer -- "no game is close
+    to kickoff" -- is reached for zero credits.
+
+    Why the window is where it is
+    -----------------------------
+    Because the news is on a clock. NFL inactive lists are published
+    exactly ninety minutes before kickoff, which makes T-90 the single
+    most information-dense moment of the week: the one time a sharp book
+    is certain to be repricing and a pick'em book may not have caught
+    up. Polling at random hoping to be present for that is why a
+    twenty-minute cadence is the wrong shape; bracketing a scheduled
+    announcement is the right one.
+
+    This does not read news, and does not need to. A sharp book reprices
+    a WR1 the moment his team-mate is ruled out -- the line movement IS
+    the news, already interpreted, already quantified. Watching Pinnacle
+    is watching the wire with the analysis done.
+    """
+    from . import parlay as P
+
+    db = Database(cfg.database)
+    client = build_client(cfg)
+
+    sports = args.sports or cfg.sports
+    everything = []
+    for sport in sports:
+        try:
+            # Free. This is what makes an idle run cost nothing.
+            events = client.events(sport)
+        except Exception as exc:  # noqa: BLE001
+            print(f"{sport}: could not list events: {exc}")
+            continue
+        for event, minutes in games_in_window(
+                events, args.before, args.after):
+            everything.append((sport, event, minutes))
+
+    if not everything:
+        soonest = _soonest_kickoff(client, sports)
+        print(f"No game between T-{args.before:g} and T-{args.after:g} "
+              "minutes. Nothing scanned, no credits spent.")
+        if soonest is not None:
+            hours = soonest / 60.0
+            print(f"Next kickoff is {hours:.1f}h away; this window opens "
+                  f"in {(soonest - args.before) / 60.0:.1f}h.")
+        db.close()
+        return 0
+
+    everything.sort(key=lambda row: row[2])
+    print(f"{len(everything)} game(s) in the kickoff window:")
+    for sport, event, minutes in everything:
+        print(f"  T-{minutes:>5.0f}m  {event.get('away_team')} @ "
+              f"{event.get('home_team')}")
+    if args.dry_run:
+        print("\n--dry-run: stopping here, nothing scanned.")
+        db.close()
+        return 0
+
+    # Narrow the scan to exactly this window by moving BOTH bounds: the
+    # look-ahead becomes the window's far edge and the floor its near
+    # one, so the ordinary scan machinery sees only these games.
+    in_window_sports = sorted({row[0] for row in everything})
+    cfg.sports = in_window_sports
+    cfg.model.min_minutes_to_start = args.after
+    for sport in in_window_sports:
+        cfg.prop_windows[sport] = args.before / 60.0
+
+    db.close()
+    args.max_events = None
+    args.sports = in_window_sports
+    return cmd_parlay_scan(cfg, args)
+
+
+def _soonest_kickoff(client, sports) -> float | None:
+    """Minutes to the next kickoff across these sports, for the idle note."""
+    now = datetime.now(timezone.utc)
+    best = None
+    for sport in sports:
+        try:
+            events = client.events(sport)
+        except Exception:  # noqa: BLE001
+            continue
+        for event in events:
+            start = parse_timestamp(event.get("commence_time"))
+            if start is None:
+                continue
+            minutes = (start - now).total_seconds() / 60.0
+            if minutes > 0 and (best is None or minutes < best):
+                best = minutes
+    return best
+
+
 def cmd_parlay_moves(cfg: Config, args) -> int:
     """
     What has moved since the history started, without spending a credit.
@@ -2929,6 +3049,48 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--player", nargs="+", metavar="NAME",
                    help="look up specific players")
     s.set_defaults(func=cmd_parlay_rosters)
+
+    s = psub.add_parser(
+        "watch",
+        help="scan only when a game is near kickoff",
+        description="Made to be run every few minutes from cron. The "
+                    "event list is a FREE call, so the common answer -- "
+                    "no game is close to kickoff -- costs nothing. NFL "
+                    "inactives publish exactly 90 minutes before kickoff, "
+                    "which is why the default window brackets it.",
+    )
+    s.add_argument("--before", type=float, default=120.0, metavar="MIN",
+                   help="far edge of the window, in minutes before "
+                        "kickoff (default 120)")
+    s.add_argument("--after", type=float, default=60.0, metavar="MIN",
+                   help="near edge, in minutes before kickoff (default 60). "
+                        "The default 120..60 brackets the 90-minute "
+                        "inactive report.")
+    s.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="say which games are in the window, scan nothing")
+    s.add_argument("--sports", nargs="+")
+    s.add_argument("--products", nargs="+", metavar="KEY")
+    s.add_argument("--profile", metavar="NAME")
+    s.add_argument("--limit", type=int, default=15)
+    s.add_argument("--bankroll", type=float)
+    s.add_argument("--min-ev", type=float, dest="min_ev")
+    s.add_argument("--min-leg-edge", type=float, dest="min_leg_edge",
+                   metavar="X")
+    s.add_argument("--max-legs", type=int, dest="max_legs")
+    s.add_argument("--draws", type=int)
+    s.add_argument("--rosters", metavar="FILE")
+    s.add_argument("--interpolate", action="store_true")
+    s.add_argument("--grouping", choices=["same_game", "same_slate", "any"])
+    s.add_argument("--offered-price", type=float, dest="offered_price",
+                   metavar="DECIMAL")
+    s.add_argument("--ignore-budget", action="store_true",
+                   dest="ignore_budget")
+    s.add_argument("--hide-suspect", action="store_true", dest="hide_suspect")
+    s.add_argument("--no-notify", action="store_true", dest="no_notify")
+    s.add_argument("--dry-run-notify", action="store_true",
+                   dest="dry_run_notify")
+    s.add_argument("--no-report", action="store_true", dest="no_report")
+    s.set_defaults(func=cmd_parlay_watch)
 
     s = psub.add_parser(
         "moves",
