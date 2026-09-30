@@ -1465,7 +1465,31 @@ class Database:
                  note or None, opportunity_id),
             )
 
-    def paper_ledger(self, sport: str | None = None, flat_stake: float = 1.0):
+    @staticmethod
+    def opportunity_identity(row) -> tuple:
+        """
+        What makes two flagged rows THE SAME BET.
+
+        Not the same row: every scan inserts a fresh one, so a slate
+        scanned three times records each prop three times. Counted
+        naively that is three independent results from one outcome --
+        which inflates the sample, narrows the confidence interval that
+        is supposed to keep you honest, and makes one lucky prop look
+        like three confirmations of an edge.
+        """
+        def norm(value):
+            if value is None or value == "":
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            return " ".join(str(value).strip().lower().split())
+
+        return tuple(norm(row[f]) for f in
+                     ("sport", "event_id", "market", "selection", "side",
+                      "line"))
+
+    def paper_ledger(self, sport: str | None = None, flat_stake: float = 1.0,
+                     dedupe: bool = True):
         """
         What the strategy would have made, at two stake rules.
 
@@ -1483,13 +1507,26 @@ class Database:
         if sport:
             sql.append("AND sport = ?")
             params.append(sport)
+        sql.append("ORDER BY scanned_at")
         rows = self.conn.execute(" ".join(sql), params).fetchall()
+
+        raw = len(rows)
+        if dedupe:
+            # The EARLIEST flag wins. That is the moment you would have
+            # been told about it and the price you would have taken; a
+            # later scan of the same board is the same bet seen again,
+            # not a second chance at it.
+            first: dict = {}
+            for row in rows:
+                first.setdefault(self.opportunity_identity(row), row)
+            rows = list(first.values())
 
         out = {
             "settled": 0, "won": 0, "lost": 0, "push": 0, "void": 0,
             "flat_staked": 0.0, "flat_pnl": 0.0,
             "kelly_staked": 0.0, "kelly_pnl": 0.0,
             "modelled_pnl": 0.0,
+            "rows_seen": raw, "duplicates_collapsed": raw - len(rows),
         }
         for row in rows:
             status = row["result"]

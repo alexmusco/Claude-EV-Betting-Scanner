@@ -2556,6 +2556,15 @@ def cmd_paper(cfg: Config, args) -> int:
 
     n = led["settled"]
     print(f"PAPER LEDGER -- every flagged bet, settled, none of it real\n")
+    if led.get("duplicates_collapsed"):
+        # Say it out loud. The same prop flagged by three scans of one
+        # board is one bet seen three times, and counting it three ways
+        # would narrow the very interval that is meant to keep this
+        # honest.
+        print(f"  {led['rows_seen']:,} settled rows collapse to "
+              f"{led['rows_seen'] - led['duplicates_collapsed']:,} distinct "
+              f"bets\n  ({led['duplicates_collapsed']:,} were the same bet "
+              "flagged by a later scan of the same board)\n")
     print(f"  Settled            {n:,}   "
           f"({led['won']} won, {led['lost']} lost, {led['push']} push"
           + (f", {led['void']} void" if led["void"] else "") + ")")

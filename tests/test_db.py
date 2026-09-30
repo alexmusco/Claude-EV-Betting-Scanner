@@ -566,9 +566,9 @@ class TestPaperLedger:
         """
         db = Database(tmp_path / "t.db")
         db.record_opportunity_result(
-            self.flag(db, price=3.0, stake=10.0), "won")
+            self.flag(db, selection="A", price=3.0, stake=10.0), "won")
         db.record_opportunity_result(
-            self.flag(db, price=3.0, stake=1.0), "lost")
+            self.flag(db, selection="B", price=3.0, stake=1.0), "lost")
 
         led = db.paper_ledger(flat_stake=1.0)
         assert led["settled"] == 2 and led["won"] == 1 and led["lost"] == 1
@@ -576,6 +576,56 @@ class TestPaperLedger:
         assert led["flat_pnl"] == pytest.approx(1.0)      # +2 then -1
         assert led["kelly_staked"] == 11.0
         assert led["kelly_pnl"] == pytest.approx(19.0)    # +20 then -1
+
+    def test_one_bet_flagged_by_three_scans_is_ONE_bet(self, tmp_path):
+        """
+        Every scan inserts a fresh row, so a slate scanned three times
+        records each prop three times. Counted naively that is three
+        independent results from one outcome -- which inflates the
+        sample, narrows the interval meant to keep this honest, and makes
+        one lucky prop look like three confirmations.
+        """
+        db = Database(tmp_path / "t.db")
+        for _ in range(3):
+            db.record_opportunity_result(self.flag(db, selection="A"), "won")
+
+        led = db.paper_ledger()
+        assert led["settled"] == 1
+        assert led["won"] == 1
+        assert led["duplicates_collapsed"] == 2
+        assert led["rows_seen"] == 3
+
+    def test_the_earliest_flag_is_the_one_kept(self, tmp_path):
+        # That is the moment you would have been told and the price you
+        # would have taken; a later scan is the same bet seen again, not
+        # a second chance at it.
+        db = Database(tmp_path / "t.db")
+        first = self.flag(db, selection="A", price=3.0)
+        db.conn.execute("UPDATE opportunities SET scanned_at='2026-01-01' "
+                        "WHERE id=?", (first,))
+        second = self.flag(db, selection="A", price=9.0)
+        db.conn.execute("UPDATE opportunities SET scanned_at='2026-06-01' "
+                        "WHERE id=?", (second,))
+        db.conn.commit()
+        db.record_opportunity_result(first, "won")
+        db.record_opportunity_result(second, "won")
+
+        led = db.paper_ledger(flat_stake=1.0)
+        assert led["settled"] == 1
+        assert led["flat_pnl"] == pytest.approx(2.0)   # the 3.0 price, not 9.0
+
+    def test_two_genuinely_different_bets_are_not_collapsed(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        db.record_opportunity_result(self.flag(db, selection="A"), "won")
+        db.record_opportunity_result(self.flag(db, selection="B"), "lost")
+        led = db.paper_ledger()
+        assert led["settled"] == 2 and led["duplicates_collapsed"] == 0
+
+    def test_dedupe_can_be_turned_off_to_see_the_raw_record(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        for _ in range(3):
+            db.record_opportunity_result(self.flag(db, selection="A"), "won")
+        assert db.paper_ledger(dedupe=False)["settled"] == 3
 
     def test_a_push_returns_the_stake_rather_than_counting_either_way(
             self, tmp_path):
