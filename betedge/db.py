@@ -77,7 +77,15 @@ CREATE TABLE IF NOT EXISTS opportunities (
     sharp_last_update       TEXT,
     soft_last_update        TEXT,
     suspect                 INTEGER NOT NULL DEFAULT 0,
-    flags                   TEXT
+    flags                   TEXT,
+    -- The paper ledger. Every flagged opportunity is a bet the strategy
+    -- made, whether or not anyone placed it; settling them here answers
+    -- "does this work" without money and without the selection bias a
+    -- hand-kept ledger carries.
+    result                  TEXT,
+    actual                  REAL,
+    settled_at              TEXT,
+    settle_note             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_opp_event   ON opportunities(event_id);
@@ -487,6 +495,18 @@ class Database:
                 "liquidity": "REAL",
                 "required_ev": "REAL",
                 "edge_score": "REAL",
+                # The PAPER LEDGER.
+                #
+                # Every flagged opportunity is a bet the strategy made,
+                # whether or not a human got round to placing it. Settled
+                # here, the table answers the only question that matters
+                # -- does this work -- without anyone risking money and
+                # without the selection bias a hand-kept ledger carries,
+                # where you log what you bet and you bet what you liked.
+                "result": "TEXT",          # won | lost | push | void
+                "actual": "REAL",          # what the player did
+                "settled_at": "TEXT",
+                "settle_note": "TEXT",     # why it could NOT be settled
             },
         }
         for table, columns in wanted.items():
@@ -1391,6 +1411,115 @@ class Database:
             "observations": sum(r["n"] for r in rows),
             "widest_span_hours": span,
         }
+
+    # -------------------------------------------------------------
+    # The paper ledger
+    # -------------------------------------------------------------
+
+    def settleable_opportunities(self, sport: str | None = None,
+                                 now=None, retry_unsettled: bool = False):
+        """
+        Flagged bets whose game has finished and which have no result yet.
+
+        Only the ones the strategy would ACTUALLY HAVE BET: a suspect row
+        or one staked at zero is a bet the tool refused, and counting its
+        outcome either way would measure something nobody would have
+        done. They stay in the table; they are not part of the record.
+
+        `retry_unsettled` brings back rows that failed to settle before --
+        usually because the results feed had not published yet, which is
+        a reason to try again tomorrow rather than never.
+        """
+        now = now or datetime.now(timezone.utc)
+        sql = ["SELECT * FROM opportunities WHERE result IS NULL",
+               "AND suspect = 0",
+               "AND recommended_stake > 0",
+               "AND commence_time < ?"]
+        params = [now.isoformat()]
+        if not retry_unsettled:
+            sql.append("AND settle_note IS NULL")
+        if sport:
+            sql.append("AND sport = ?")
+            params.append(sport)
+        sql.append("ORDER BY commence_time")
+        return self.conn.execute(" ".join(sql), params).fetchall()
+
+    def record_opportunity_result(self, opportunity_id: int,
+                                  status: str | None = None,
+                                  actual: float | None = None,
+                                  note: str = "", at=None) -> None:
+        """
+        Settle one paper bet, or record why it could not be settled.
+
+        A refusal is stored, not discarded. "Could not match this player"
+        and "has not been looked at" are different states, and a run that
+        cannot tell them apart re-does the same impossible work every
+        night while reporting a sample smaller than it really is.
+        """
+        at = at or datetime.now(timezone.utc)
+        with self.tx() as c:
+            c.execute(
+                "UPDATE opportunities SET result=?, actual=?, settled_at=?, "
+                "settle_note=? WHERE id=?",
+                (status, actual, at.isoformat() if status else None,
+                 note or None, opportunity_id),
+            )
+
+    def paper_ledger(self, sport: str | None = None, flat_stake: float = 1.0):
+        """
+        What the strategy would have made, at two stake rules.
+
+        FLAT measures the picks alone: every bet the same size, so the
+        result is the quality of the selections and nothing else. KELLY
+        measures the whole system, sizing included -- a strategy can pick
+        well and size badly, and one number cannot show both.
+
+        A push returns the stake and a void never happened, so neither
+        counts as a bet placed; folding either into wins or losses would
+        bias every figure here in the direction it was folded.
+        """
+        sql = ["SELECT * FROM opportunities WHERE result IS NOT NULL"]
+        params: list = []
+        if sport:
+            sql.append("AND sport = ?")
+            params.append(sport)
+        rows = self.conn.execute(" ".join(sql), params).fetchall()
+
+        out = {
+            "settled": 0, "won": 0, "lost": 0, "push": 0, "void": 0,
+            "flat_staked": 0.0, "flat_pnl": 0.0,
+            "kelly_staked": 0.0, "kelly_pnl": 0.0,
+            "modelled_pnl": 0.0,
+        }
+        for row in rows:
+            status = row["result"]
+            out[status] = out.get(status, 0) + 1
+            if status in ("void",):
+                continue
+            out["settled"] += 1
+            price = row["soft_price"] or 1.0
+            kelly = row["recommended_stake"] or 0.0
+            for label, stake in (("flat", flat_stake), ("kelly", kelly)):
+                out[f"{label}_staked"] += stake
+                if status == "won":
+                    out[f"{label}_pnl"] += stake * (price - 1.0)
+                elif status == "lost":
+                    out[f"{label}_pnl"] -= stake
+            # What the model SAID this bet was worth, for the
+            # realisation ratio: predicted against delivered.
+            out["modelled_pnl"] += kelly * (row["ev"] or 0.0)
+        return out
+
+    def paper_unsettled(self, sport: str | None = None):
+        """Rows that could not be settled, grouped by the reason given."""
+        sql = ["SELECT settle_note, COUNT(*) n FROM opportunities",
+               "WHERE result IS NULL AND settle_note IS NOT NULL"]
+        params: list = []
+        if sport:
+            sql.append("AND sport = ?")
+            params.append(sport)
+        sql.append("GROUP BY settle_note ORDER BY n DESC")
+        return self.conn.execute(" ".join(sql), params).fetchall()
 
     def get_bet(self, bet_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()

@@ -176,3 +176,60 @@ class TestReadingTheFeed:
             "2026,2,,SF,MIA,3\n"
             "2026,2,Deebo Samuel,SF,MIA,5\n")
         assert len(R.read_weekly_stats(path)) == 1
+
+
+class TestTeamsAndWeeks:
+    """
+    The narrowing that stops one player in two weeks reading as two
+    players with the same name.
+    """
+
+    def test_a_full_name_becomes_the_feeds_abbreviation(self):
+        assert R.abbreviate("New Orleans Saints") == "NO"
+        assert R.abbreviate("San Francisco 49ers") == "SF"
+
+    def test_an_unknown_club_narrows_nothing_rather_than_guessing(self):
+        # A wrong abbreviation would settle a bet against the wrong game,
+        # which is the one outcome this module exists to prevent.
+        assert R.abbreviate("Springfield Isotopes") == ""
+        assert R.abbreviate("") == ""
+
+    def test_the_week_is_read_off_the_game_id(self):
+        # The player-stats feed carries no date column at all -- reaching
+        # for `gameday` returned None every time and narrowed nothing.
+        assert R.week_from_game_id("2026_03_PIT_DET") == 3
+        assert R.week_from_game_id("2026_11_NO_BAL") == 11
+
+    def test_a_malformed_game_id_gives_no_week(self):
+        assert R.week_from_game_id("") is None
+        assert R.week_from_game_id("nonsense") is None
+
+    def test_teams_narrow_a_player_to_one_game(self):
+        book = R.ResultBook([
+            game("Chris Olave", team="NO", opponent="DET", week=1,
+                 receptions="10"),
+            game("Chris Olave", team="NO", opponent="BAL", week=2,
+                 receptions="8"),
+        ])
+        settled = R.settle_bet(
+            book, "player_receptions", "Chris Olave", "Over", 7.5,
+            teams=["New Orleans Saints", "Baltimore Ravens"])
+        assert settled.status == R.WON and settled.actual == 8
+
+    def test_without_teams_it_refuses_and_says_which_ambiguity(self):
+        """
+        One player in several weeks is a NARROWING failure. Two players
+        sharing a name is a collision. Reporting the wrong one sends the
+        reader hunting something that is not there.
+        """
+        book = R.ResultBook([
+            game("Chris Olave", team="NO", opponent="DET", week=1,
+                 receptions="10"),
+            game("Chris Olave", team="NO", opponent="BAL", week=2,
+                 receptions="8"),
+        ])
+        settled = R.settle_bet(book, "player_receptions", "Chris Olave",
+                               "Over", 7.5)
+        assert not settled.settled
+        assert "appears in weeks 1, 2" in settled.reason
+        assert "different players" not in settled.reason

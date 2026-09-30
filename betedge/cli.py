@@ -2413,6 +2413,195 @@ def games_in_window(events, before_minutes: float, after_minutes: float,
     return out
 
 
+def cmd_settle_auto(cfg: Config, args) -> int:
+    """
+    Settle the paper ledger from what actually happened.
+
+    No money, no input, no selection. Every bet the strategy flagged and
+    would have staked gets an outcome, which is the only way to learn
+    whether it works: a ledger you fill in by hand measures YOU, because
+    you log what you bet and you bet what you liked.
+
+    Refusals are recorded rather than dropped. A player the feed does not
+    know and a week the feed has not published yet are different
+    problems, and a run that cannot tell them apart repeats the same
+    impossible work nightly while under-reporting its own sample.
+    """
+    from collections import Counter
+
+    from . import results as R
+
+    db = Database(cfg.database)
+    rows = db.settleable_opportunities(sport=args.sport,
+                                       retry_unsettled=args.retry)
+    if not rows:
+        print("Nothing to settle: no finished game has an unsettled "
+              "flagged bet.")
+        db.close()
+        return 0
+
+    seasons = sorted({
+        parse_timestamp(r["commence_time"]).year
+        for r in rows if parse_timestamp(r["commence_time"])
+    })
+    data_dir = Path(cfg.database).parent
+    books = {}
+    for season in seasons:
+        path = data_dir / f"nfl_player_stats_{season}.csv"
+        if args.refresh or not path.exists():
+            print(f"Fetching {season} player stats ...")
+            try:
+                R.download_weekly_stats(season, path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  could not fetch {season}: {exc}")
+                continue
+        try:
+            books[season] = R.read_weekly_stats(path)
+        except R.ResultsError as exc:
+            print(f"  {season}: {exc}")
+
+    if not books:
+        print("No results feed available, so nothing could be settled.")
+        db.close()
+        return 1
+
+    for season, book in books.items():
+        thin = book.incomplete_weeks()
+        if thin:
+            weeks = ", ".join(f"week {w} ({n} of ~{full})"
+                              for w, n, full in thin)
+            print(f"{season}: {weeks} -- still publishing, so bets in "
+                  "those weeks will wait.")
+
+    settled = refused = 0
+    reasons = Counter()
+    for row in rows:
+        start = parse_timestamp(row["commence_time"])
+        book = books.get(start.year) if start else None
+        if book is None:
+            db.record_opportunity_result(
+                row["id"], note=f"no results feed for {start and start.year}")
+            refused += 1
+            continue
+        week = _nfl_week(book, start,
+                         home=row["home_team"], away=row["away_team"])
+        outcome = R.settle_bet(
+            book, row["market"], row["selection"], row["side"], row["line"],
+            week=week,
+            teams=[row["home_team"], row["away_team"]],
+        )
+        if outcome.settled:
+            db.record_opportunity_result(row["id"], outcome.status,
+                                         outcome.actual)
+            settled += 1
+        else:
+            db.record_opportunity_result(row["id"], note=outcome.reason)
+            reasons[outcome.reason] += 1
+            refused += 1
+
+    print(f"\nSettled {settled}, could not settle {refused}.")
+    for reason, count in reasons.most_common(6):
+        print(f"  {count:>4}  {reason}")
+    if refused:
+        print("\nRefusals are stored, not dropped -- `--retry` picks them "
+              "up again once the feed catches up.")
+    db.close()
+    return 0
+
+
+def _nfl_week(book, start, home="", away="") -> int | None:
+    """
+    Which NFL week a kickoff belongs to.
+
+    Found by TEAMS, not by date, because the player-stats feed carries no
+    date column at all -- the first version of this reached for `gameday`
+    and `game_date`, got None every time, and so narrowed nothing. Two
+    clubs meet at most twice a season, so the pair identifies the game
+    about as well as a date would and needs nothing the feed lacks.
+    """
+    from . import results as R
+
+    wanted = {a for a in (R.abbreviate(home), R.abbreviate(away)) if a}
+    if not wanted:
+        return None
+    weeks = {
+        game.week for game in book.games
+        if game.team.upper() in wanted and game.opponent.upper() in wanted
+    }
+    return weeks.pop() if len(weeks) == 1 else None
+
+
+def cmd_paper(cfg: Config, args) -> int:
+    """
+    What the strategy would have made, with nobody betting anything.
+
+    Two stake rules, because they answer different questions. FLAT is the
+    quality of the picks and nothing else. KELLY is the whole system,
+    sizing included -- a strategy can pick well and size badly, and one
+    number cannot show both.
+    """
+    db = Database(cfg.database)
+    led = db.paper_ledger(sport=args.sport, flat_stake=args.stake)
+
+    if not led["settled"]:
+        pending = len(db.settleable_opportunities(sport=args.sport))
+        print("No settled paper bets yet.")
+        if pending:
+            print(f"{pending} are waiting on `betedge settle-auto`.")
+        else:
+            print("Flagged bets appear here once their games finish and "
+                  "`betedge settle-auto` has run.")
+        db.close()
+        return 0
+
+    n = led["settled"]
+    print(f"PAPER LEDGER -- every flagged bet, settled, none of it real\n")
+    print(f"  Settled            {n:,}   "
+          f"({led['won']} won, {led['lost']} lost, {led['push']} push"
+          + (f", {led['void']} void" if led["void"] else "") + ")")
+    decided = led["won"] + led["lost"]
+    if decided:
+        print(f"  Win rate           {led['won'] / decided:.1%}")
+
+    for label in ("flat", "kelly"):
+        staked = led[f"{label}_staked"]
+        pnl = led[f"{label}_pnl"]
+        if staked <= 0:
+            continue
+        name = "Flat stake" if label == "flat" else "Kelly stake"
+        print(f"\n  {name:<18} staked {staked:,.0f}   "
+              f"P&L {pnl:+,.2f}   ROI {pnl / staked:+.1%}")
+
+    modelled = led["modelled_pnl"]
+    if modelled:
+        ratio = led["kelly_pnl"] / modelled
+        print(f"\n  Model said         {modelled:+,.2f}")
+        print(f"  Realisation        {ratio:.2f}x  "
+              "(1.00 means the edge arrived exactly as predicted)")
+
+    # The honest interval. A win rate over a few dozen bets spans most of
+    # the plausible range, and a number printed without one invites a
+    # conclusion the sample cannot support.
+    if decided >= 2:
+        import math
+
+        p = led["won"] / decided
+        se = math.sqrt(max(p * (1 - p), 1e-9) / decided)
+        lo, hi = max(0.0, p - 1.96 * se), min(1.0, p + 1.96 * se)
+        print(f"\n  95% interval on that win rate: {lo:.1%} to {hi:.1%}")
+        if decided < 300:
+            print(f"  {decided} bets is not yet enough to separate an edge "
+                  "from a streak.")
+
+    unsettled = db.paper_unsettled(sport=args.sport)
+    if unsettled:
+        print("\nNot settled:")
+        for row in unsettled[:6]:
+            print(f"  {row['n']:>4}  {row['settle_note']}")
+    db.close()
+    return 0
+
+
 def cmd_parlay_watch(cfg: Config, args) -> int:
     """
     Scan only when a game is in its kickoff window, and cost nothing
@@ -3148,6 +3337,34 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true",
                    help="overwrite an existing copy")
     s.set_defaults(func=cmd_config_init)
+
+    s = sub.add_parser(
+        "settle-auto",
+        help="settle the paper ledger from real results",
+        description="Every flagged bet gets an outcome from nflverse's "
+                    "player statistics -- no money, no input, no "
+                    "selection. A bet it cannot match is recorded as "
+                    "unsettled WITH THE REASON, never guessed at.",
+    )
+    s.add_argument("--sport")
+    s.add_argument("--refresh", action="store_true",
+                   help="re-download the results feed")
+    s.add_argument("--retry", action="store_true",
+                   help="try again on bets that failed to settle before, "
+                        "which is what you want once the feed catches up")
+    s.set_defaults(func=cmd_settle_auto)
+
+    s = sub.add_parser(
+        "paper",
+        help="what the strategy would have made, with nothing at stake",
+        description="The honest instrument. A hand-kept ledger measures "
+                    "YOU -- you log what you bet and you bet what you "
+                    "liked. This counts every bet the strategy flagged.",
+    )
+    s.add_argument("--sport")
+    s.add_argument("--stake", type=float, default=1.0, metavar="UNITS",
+                   help="flat stake per bet (default 1)")
+    s.set_defaults(func=cmd_paper)
 
     p_kalshi = sub.add_parser(
         "kalshi", help="price Kalshi ladders against the sharp line"

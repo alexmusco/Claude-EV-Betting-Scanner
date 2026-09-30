@@ -82,6 +82,61 @@ TD_COLUMNS = ("rushing_tds", "receiving_tds", "special_teams_tds")
 SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
+#: nflverse team abbreviations against the full names an odds feed uses.
+#:
+#: A lookup table, not a fact worth deriving: the stats feed identifies a
+#: club as "NO" and the odds feed as "New Orleans Saints", and nothing in
+#: either string tells you they are the same. Without it the team filter
+#: silently matches nothing, which is how one player appearing in two
+#: weeks came to be reported as two players with the same name.
+TEAM_ABBREVIATIONS = {
+    "arizona cardinals": "ARI", "atlanta falcons": "ATL",
+    "baltimore ravens": "BAL", "buffalo bills": "BUF",
+    "carolina panthers": "CAR", "chicago bears": "CHI",
+    "cincinnati bengals": "CIN", "cleveland browns": "CLE",
+    "dallas cowboys": "DAL", "denver broncos": "DEN",
+    "detroit lions": "DET", "green bay packers": "GB",
+    "houston texans": "HOU", "indianapolis colts": "IND",
+    "jacksonville jaguars": "JAX", "kansas city chiefs": "KC",
+    "las vegas raiders": "LV", "los angeles chargers": "LAC",
+    "los angeles rams": "LA", "miami dolphins": "MIA",
+    "minnesota vikings": "MIN", "new england patriots": "NE",
+    "new orleans saints": "NO", "new york giants": "NYG",
+    "new york jets": "NYJ", "philadelphia eagles": "PHI",
+    "pittsburgh steelers": "PIT", "san francisco 49ers": "SF",
+    "seattle seahawks": "SEA", "tampa bay buccaneers": "TB",
+    "tennessee titans": "TEN", "washington commanders": "WAS",
+}
+
+
+def abbreviate(team: str) -> str:
+    """
+    A club's stats-feed abbreviation, or "" when it is not known.
+
+    Returns empty rather than a guess: an unknown club narrows nothing,
+    and narrowing by a wrong abbreviation would settle a bet against the
+    wrong game, which is the one outcome this module exists to prevent.
+    """
+    return TEAM_ABBREVIATIONS.get(" ".join(str(team or "").lower().split()), "")
+
+
+def week_from_game_id(game_id: str):
+    """
+    The week encoded in an nflverse game id, e.g. "2026_03_PIT_DET" -> 3.
+
+    Taken from the id because this feed carries no date column at all --
+    a fact worth stating, since the obvious approach is to map a kickoff
+    date onto a week and there is nothing here to map it with.
+    """
+    parts = str(game_id or "").split("_")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
 class ResultsError(RuntimeError):
     """The results feed could not be read."""
 
@@ -219,12 +274,37 @@ class ResultBook:
             found = in_week
 
         if teams:
-            wanted = {str(t).upper() for t in teams if t}
-            narrowed = [g for g in found
-                        if g.team.upper() in wanted
-                        or g.opponent.upper() in wanted]
-            if narrowed:
-                found = narrowed
+            # Translate before comparing. Full names never equal
+            # abbreviations, so an untranslated filter narrows nothing
+            # and quietly leaves every week of the season in play.
+            wanted = {a for a in (abbreviate(t) for t in teams if t) if a}
+            wanted |= {str(t).upper() for t in teams
+                       if t and len(str(t)) <= 3}
+            # TWO narrowings, and they answer different questions.
+            #
+            # Either slot picks the right PLAYER: two men sharing a name
+            # are told apart by which club they play for, and a bet only
+            # ever names one of the two clubs on the field.
+            #
+            # Both slots pick the right GAME: a player's own team appears
+            # in every one of his seventeen fixtures, so matching one
+            # slot narrows nothing at all -- it is the PAIR that names a
+            # meeting, and two clubs meet at most twice a season.
+            #
+            # Applying only the second broke the first; applying only the
+            # first left one player in every week he played. In order,
+            # each does the job the other cannot.
+            if wanted:
+                by_club = [g for g in found
+                           if g.team.upper() in wanted
+                           or g.opponent.upper() in wanted]
+                if by_club:
+                    found = by_club
+                by_fixture = [g for g in found
+                              if g.team.upper() in wanted
+                              and g.opponent.upper() in wanted]
+                if by_fixture:
+                    found = by_fixture
         return found, ""
 
 
@@ -305,10 +385,23 @@ def settle_bet(book: ResultBook, market: str, selection: str, side: str,
     if reason:
         return Settlement(None, reason=reason)
     if len(candidates) > 1:
-        teams_seen = sorted({g.team for g in candidates})
+        # Two different ambiguities, and saying the wrong one sends the
+        # reader hunting a name collision that does not exist. One player
+        # appearing in several weeks is a NARROWING failure; two players
+        # sharing a name is a genuine collision.
+        weeks = sorted({g.week for g in candidates})
+        teams_seen = sorted({g.team.upper() for g in candidates})
+        if len(teams_seen) == 1:
+            return Settlement(
+                None, player=candidates[0].player,
+                reason=(f"{selection} appears in weeks "
+                        f"{', '.join(str(w) for w in weeks)} and the game "
+                        "was not narrowed to one -- no week, and the teams "
+                        "did not match the feed"))
         return Settlement(
-            None, reason=(f"{len(candidates)} players match {selection!r} "
-                          f"({', '.join(teams_seen)}) -- ambiguous"))
+            None, reason=(f"{len(candidates)} different players match "
+                          f"{selection!r} ({', '.join(teams_seen)}) "
+                          "-- ambiguous"))
 
     game = candidates[0]
     base = market.replace("_alternate", "")

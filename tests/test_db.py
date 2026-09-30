@@ -482,3 +482,121 @@ class TestPropLineHistory:
         assert db.line_movements(now=self.now()) != []
         assert db.line_movements(
             max_age_hours=1.0, now=self.T0 + timedelta(hours=5)) == []
+
+
+class TestPaperLedger:
+    """
+    Every flagged bet counted, settled, none of it real.
+
+    A ledger filled in by hand measures the OPERATOR: you log what you
+    bet and you bet what you liked, so the ROI carries your selection on
+    top of the model's with no way to separate them. This counts what the
+    strategy actually said.
+    """
+
+    def flag(self, db, selection="Chris Olave", price=2.0, ev=0.05,
+             stake=5.0, suspect=0, commence="2026-09-13T17:00:00Z"):
+        scan = db.conn.execute(
+            "INSERT INTO scans (started_at, finished_at, sports) "
+            "VALUES (?,?,?)", ("t", "t", "americanfootball_nfl")).lastrowid
+        return db.conn.execute(
+            "INSERT INTO opportunities (scan_id, scanned_at, sport, event_id,"
+            " commence_time, market, selection, line, side, sharp_book,"
+            " sharp_price_taken_side, sharp_price_other_side, sharp_overround,"
+            " fair_prob, fair_price, devig_method, devig_spread, soft_book,"
+            " soft_price, ev, recommended_stake, suspect)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (scan, "t", "americanfootball_nfl", "e1", commence,
+             "player_receptions", selection, 4.5, "Over", "pinnacle",
+             1.9, 1.9, 0.04, 0.52, 1.92, "multiplicative", 0.01,
+             "draftkings", price, ev, stake, suspect)).lastrowid
+
+    def test_a_finished_game_is_settleable(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.flag(db)
+        assert len(db.settleable_opportunities()) == 1
+
+    def test_a_game_that_has_not_started_is_not(self, tmp_path):
+        from datetime import timedelta
+
+        db = Database(tmp_path / "t.db")
+        later = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        self.flag(db, commence=later)
+        assert db.settleable_opportunities() == []
+
+    def test_a_suspect_bet_is_not_part_of_the_record(self, tmp_path):
+        """
+        The tool refused to stake it, so counting its outcome either way
+        would measure something nobody would have done.
+        """
+        db = Database(tmp_path / "t.db")
+        self.flag(db, suspect=1)
+        assert db.settleable_opportunities() == []
+
+    def test_a_bet_staked_at_zero_is_not_either(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        self.flag(db, stake=0.0)
+        assert db.settleable_opportunities() == []
+
+    def test_a_settled_bet_is_not_offered_again(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        opp = self.flag(db)
+        db.record_opportunity_result(opp, "won", actual=8)
+        assert db.settleable_opportunities() == []
+
+    def test_a_refusal_is_remembered_so_it_is_not_retried_forever(
+            self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        opp = self.flag(db)
+        db.record_opportunity_result(opp, note="no such player")
+        assert db.settleable_opportunities() == []
+        assert len(db.settleable_opportunities(retry_unsettled=True)) == 1
+
+    def test_the_reason_a_bet_could_not_be_settled_is_reported(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        db.record_opportunity_result(self.flag(db), note="feed is behind")
+        (row,) = db.paper_unsettled()
+        assert row["settle_note"] == "feed is behind" and row["n"] == 1
+
+    def test_flat_and_kelly_answer_different_questions(self, tmp_path):
+        """
+        FLAT is the quality of the picks alone. KELLY is the whole
+        system, sizing included -- a strategy can pick well and size
+        badly, and one number cannot show both.
+        """
+        db = Database(tmp_path / "t.db")
+        db.record_opportunity_result(
+            self.flag(db, price=3.0, stake=10.0), "won")
+        db.record_opportunity_result(
+            self.flag(db, price=3.0, stake=1.0), "lost")
+
+        led = db.paper_ledger(flat_stake=1.0)
+        assert led["settled"] == 2 and led["won"] == 1 and led["lost"] == 1
+        assert led["flat_staked"] == 2.0
+        assert led["flat_pnl"] == pytest.approx(1.0)      # +2 then -1
+        assert led["kelly_staked"] == 11.0
+        assert led["kelly_pnl"] == pytest.approx(19.0)    # +20 then -1
+
+    def test_a_push_returns_the_stake_rather_than_counting_either_way(
+            self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        db.record_opportunity_result(self.flag(db), "push")
+        led = db.paper_ledger()
+        assert led["push"] == 1
+        assert led["flat_pnl"] == 0.0 and led["kelly_pnl"] == 0.0
+
+    def test_a_void_never_happened_so_it_is_not_a_bet_placed(self, tmp_path):
+        # Counting a DNP as a loss would drag every measured ROI down by
+        # however often players sit.
+        db = Database(tmp_path / "t.db")
+        db.record_opportunity_result(self.flag(db), "void")
+        led = db.paper_ledger()
+        assert led["void"] == 1
+        assert led["settled"] == 0 and led["kelly_staked"] == 0.0
+
+    def test_the_model_prediction_is_carried_for_the_realisation_ratio(
+            self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        db.record_opportunity_result(
+            self.flag(db, ev=0.10, stake=10.0), "won")
+        assert db.paper_ledger()["modelled_pnl"] == pytest.approx(1.0)
